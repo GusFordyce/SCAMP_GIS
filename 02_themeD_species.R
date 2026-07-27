@@ -22,7 +22,7 @@
 ##   - pmf_records.gpkg                (PMF species points)
 ##   - species_summary.csv             (presence/absence per species)
 ##=====================================================================
-install.packages('worrms')
+install.packages('jsonlite')
 
 require(rgbif)
 require(robis)
@@ -37,6 +37,7 @@ require(vegan)
 require(cowplot)
 if (!requireNamespace("worrms", quietly = TRUE)) install.packages("worrms")
 require(worrms)
+require(jsonlite)
 
 ##=====================================================================
 ## 1. SETUP
@@ -284,7 +285,8 @@ scamp_wkt <- st_as_text(st_as_sfc(scamp_bbox)) #for API queries
 ##=====================================================================
 
 ## --- INNS target list (Annex A.6) ---
-inns_list <- tribble(
+## Marine INNS — Solway-specific list from project partners
+inns_marine <- tribble(
   ~latin_name,                ~common_name,
   "Spartina anglica",         "Common cord-grass",
   "Crassostrea gigas",        "Pacific oyster",
@@ -296,8 +298,28 @@ inns_list <- tribble(
   "Styela clava",             "Stalked sea squirt",
   "Sargassum muticum",        "Japanese wireweed",
   "Ocinebrellus inornatus",   "Japanese oyster drill",
-  "Urosalpinx cinerea",       "American oyster drill"
-) %>% mutate(category = "INNS")
+  "Urosalpinx cinerea",       "American oyster drill",
+  "Caprella mutica",          "Japanese skeleton shrimp",
+  "Eriocheir sinensis",       "Chinese mitten crab"
+) %>% mutate(realm = "Marine", source_list = "SFP")
+
+## Terrestrial & freshwater INNS — JNCC B6 indicator list
+jncc_b6 <- read_csv("data/raw/species/jncc_b6_inns_list.csv",
+                     show_col_types = FALSE) %>%
+  filter(realm %in% c("Terrestrial", "Freshwater")) %>%
+  select(latin_name, common_name, realm) %>%
+  mutate(source_list = "JNCC_B6")
+
+## Combined INNS list across all three realms
+inns_list <- bind_rows(inns_marine, jncc_b6) %>%
+  distinct(latin_name, .keep_all = TRUE) %>%
+  mutate(category = "INNS")
+
+cat(sprintf("INNS list: %d marine (SFP), %d terrestrial, %d freshwater (JNCC B6) = %d total\n",
+    sum(inns_list$source_list == "SFP"),
+    sum(inns_list$realm == "Terrestrial"),
+    sum(inns_list$realm == "Freshwater"),
+    nrow(inns_list)))
 
 ## --- Indicator species (Annexes A.1–A.5) ---
 indicator_list <- tribble(
@@ -334,6 +356,9 @@ indicator_list <- tribble(
   "Aristotelia brizella",     "Saltmarsh micromoth",     "Saltmarsh",
   "Gortyna borelii lunata",   "Fisher's estuarine moth", "Saltmarsh",
   # Sand dunes
+  "Ammophila arenaria",       "Marram grass",            "Sand dunes",
+  "Elytrigia juncea",         "Sand couch",              "Sand dunes",
+  "Leymus arenarius",         "Lyme grass",              "Sand dunes",
   "Epidalea calamita",        "Natterjack toad",         "Sand dunes",
   "Lacerta agilis",           "Sand lizard",             "Sand dunes",
   "Cicindela hybrida",        "Northern dune tiger beetle","Sand dunes",
@@ -728,74 +753,111 @@ query_obis <- function(species_names = NULL, wkt, limit = 500) {
 ##   - Post-download: we extract the year from the event date and remove
 ##     records from before 1970.
 ##
+
 query_nbn <- function(species_names = NULL, bbox) {
-  cat("Querying NBN Atlas...\n")
+  cat("Querying NBN Atlas (REST API)...\n")
+  if (!requireNamespace("jsonlite", quietly = TRUE)) install.packages("jsonlite")
 
   if (is.null(species_names)) {
-    ## Bulk download is not practical through the NBN Atlas API without
-    ## a species filter — the query would time out or return incomplete
-    ## results. The all-taxa richness map uses GBIF + OBIS instead.
     cat("  Skipping NBN for bulk query (use GBIF + OBIS)\n")
     return(tibble())
   }
 
-  ## Per-species queries: loop through each species and query NBN.
+  nbn_base <- "https://records-ws.nbnatlas.org/occurrences/search"
+
+  .nbn_fetch <- function(sp) {
+    q_param <- URLencode(paste0('scientificName:"', sp, '"'), reserved = TRUE)
+    fq_param <- URLencode(paste0(
+      'decimalLatitude:[', bbox["ymin"], ' TO ', bbox["ymax"], ']',
+      ' AND decimalLongitude:[', bbox["xmin"], ' TO ', bbox["xmax"], ']'
+    ), reserved = TRUE)
+    url <- paste0(nbn_base, "?q=", q_param, "&fq=", fq_param, "&pageSize=500")
+    tryCatch({
+      resp <- jsonlite::fromJSON(url)
+      if (resp$totalRecords > 0) return(resp$occurrences)
+      return(NULL)
+    }, error = function(e) return(NULL))
+  }
+
   results <- list()
   for (i in seq_along(species_names)) {
     sp <- species_names[i]
     cat(sprintf("  [%d/%d] %s", i, length(species_names), sp))
-    tryCatch({
-      ## Build the query: search for this species within the bounding box,
-      ## and tell NBN to exclude records it has flagged with coordinate
-      ## problems before sending them to us.
-      recs <- galah_call() %>%
-        identify(sp) %>%
-        filter(
-          decimalLongitude >= bbox["xmin"],
-          decimalLongitude <= bbox["xmax"],
-          decimalLatitude  >= bbox["ymin"],
-          decimalLatitude  <= bbox["ymax"]
-        ) %>%
-        galah_filter(
-          assertions != "COORDINATE_INVALID",
-          assertions != "ZERO_COORDINATE",
-          assertions != "COUNTRY_COORDINATE_MISMATCH"
-        ) %>%
-        atlas_occurrences()
 
-      if (!is.null(recs) && nrow(recs) > 0) {
-        n_raw <- nrow(recs)
+    recs <- NULL
+    success <- FALSE
+    for (attempt in 1:2) {
+      tryCatch({
+        recs <- .nbn_fetch(sp)
+        success <- TRUE
+      }, error = function(e) {
+        if (grepl("412|429|Too Many", e$message) && attempt == 1) {
+          cat(" — rate limited, retrying in 10s...")
+          Sys.sleep(10)
+        } else {
+          cat(sprintf(" — error: %s\n", e$message))
+        }
+      })
+      if (success) break
+    }
 
-        ## Extract the observation year from the event date string.
-        recs <- recs %>%
-          mutate(yr = as.integer(substr(eventDate, 1, 4)))
+    if (success && !is.null(recs) && nrow(recs) > 0) {
+      n_raw <- nrow(recs)
+      cn <- names(recs)
 
-        ## Remove records from before 1970 or with no date.
-        recs <- qa_filter(recs,
-          !is.na(recs$yr) & recs$yr >= 1970,
-          "year_pre1970_or_missing", "NBN")
+      ## Extract coordinates
+      lon_col <- if ("decimalLongitude" %in% cn) "decimalLongitude" else
+                 if ("longitude" %in% cn) "longitude" else NULL
+      lat_col <- if ("decimalLatitude" %in% cn) "decimalLatitude" else
+                 if ("latitude" %in% cn) "latitude" else NULL
 
-        ## Standardise to the common schema with extra fields.
-        results[[sp]] <- recs %>%
-          transmute(
-            latin_name = scientificName,
-            longitude = decimalLongitude,
-            latitude = decimalLatitude,
-            year = yr,
-            coord_uncertainty = if ("coordinateUncertaintyInMeters" %in% names(recs))
-              coordinateUncertaintyInMeters else NA_real_,
-            basis_of_record = if ("basisOfRecord" %in% names(recs))
-              basisOfRecord else NA_character_,
-            kingdom = if ("kingdom" %in% names(recs)) kingdom else NA_character_,
-            phylum = if ("phylum" %in% names(recs)) phylum else NA_character_,
-            class = if ("class" %in% names(recs)) class else NA_character_,
-            source = "NBN"
-          )
-        cat(sprintf(" — %d/%d records after QA\n", nrow(results[[sp]]), n_raw))
-      } else {
-        cat(" — 0 records\n")
+      if (!is.null(lon_col)) {
+        recs[[lon_col]] <- as.numeric(recs[[lon_col]])
       }
-    }, error = function(e) cat(sprintf(" — error: %s\n", e$message)))
+      if (!is.null(lat_col)) {
+        recs[[lat_col]] <- as.numeric(recs[[lat_col]])
+      }
+
+      ## Extract year
+      if ("year" %in% cn) {
+        recs$yr <- as.integer(recs$year)
+      } else if ("eventDate" %in% cn) {
+        recs$yr <- as.integer(substr(as.character(recs$eventDate), 1, 4))
+      } else {
+        recs$yr <- NA_integer_
+      }
+
+      ## Remove records from before 1970 or with no date
+      recs <- qa_filter(recs,
+        !is.na(recs$yr) & recs$yr >= 1970,
+        "year_pre1970_or_missing", "NBN")
+
+      ## Extract species name
+      name_col <- if ("scientificName" %in% cn) "scientificName" else
+                  if ("species" %in% cn) "species" else
+                  if ("taxonConceptID" %in% cn) "taxonConceptID" else NULL
+
+      results[[sp]] <- tibble(
+        latin_name       = if (!is.null(name_col)) recs[[name_col]] else sp,
+        longitude        = if (!is.null(lon_col)) recs[[lon_col]] else NA_real_,
+        latitude         = if (!is.null(lat_col)) recs[[lat_col]] else NA_real_,
+        year             = recs$yr,
+        coord_uncertainty = if ("coordinateUncertaintyInMeters" %in% cn)
+          as.numeric(recs$coordinateUncertaintyInMeters) else NA_real_,
+        basis_of_record  = if ("basisOfRecord" %in% cn)
+          recs$basisOfRecord else NA_character_,
+        kingdom          = if ("kingdom" %in% cn) recs$kingdom else NA_character_,
+        phylum           = if ("phylum" %in% cn) recs$phylum else NA_character_,
+        class            = if ("classs" %in% cn) recs$classs else
+                           if ("class" %in% cn) recs$class else NA_character_,
+        source           = "NBN"
+      )
+      cat(sprintf(" — %d/%d records after QA\n", nrow(results[[sp]]), n_raw))
+    } else if (success) {
+      cat(" — 0 records\n")
+    }
+
+    Sys.sleep(2)
   }
   bind_rows(results)
 }
@@ -1220,8 +1282,8 @@ grid_bng <- st_transform(grid_osgb, 27700)
 grid_touches <- st_touches(grid_bng)
 
 ## --- Helper: compute metrics for one realm ---
-## Metrics: richness, effort, temporal (median year + most recent),
-## sampling completeness, beta diversity, community similarity.
+## Metrics: richness, effort, temporal (median + most recent year),
+## beta diversity, community similarity, per-phylum richness breakdown.
 compute_grid_metrics <- function(df, realm_label) {
   df_realm <- df %>%
     filter(realm == realm_label, !is.na(cell_id),
@@ -1251,12 +1313,12 @@ compute_grid_metrics <- function(df, realm_label) {
   temporal <- df_realm %>%
     group_by(cell_id) %>%
     summarise(
-      median_year     = median(year, na.rm = TRUE),
+      median_year      = median(year, na.rm = TRUE),
       most_recent_year = max(year, na.rm = TRUE),
       .groups = "drop"
     )
 
-  ## Species-by-cell matrix (shared by completeness, beta, similarity)
+  ## Species-by-cell presence/absence matrix (shared by beta + similarity)
   sp_cell <- df_realm %>%
     count(cell_id, latin_name, name = "abundance")
   sp_wide <- sp_cell %>%
@@ -1264,24 +1326,9 @@ compute_grid_metrics <- function(df, realm_label) {
                 values_from = abundance, values_fill = 0L)
   cell_ids_wide <- sp_wide$cell_id
   sp_mat <- as.matrix(sp_wide[, -1])
-
-  ## Sampling completeness (rarefied richness at 10th percentile)
-  row_totals <- rowSums(sp_mat)
-  rarefy_n <- max(1L, as.integer(quantile(row_totals, 0.10)))
-  rarefied <- rep(NA_real_, nrow(sp_mat))
-  can_rarefy <- row_totals >= rarefy_n
-  if (any(can_rarefy)) {
-    rarefied[can_rarefy] <- vegan::rarefy(sp_mat[can_rarefy, , drop = FALSE],
-                                           sample = rarefy_n)
-  }
-  completeness <- tibble(
-    cell_id = cell_ids_wide,
-    rarefied_richness = rarefied,
-    rarefy_n = rarefy_n
-  )
+  pa_mat <- (sp_mat > 0) * 1L
 
   ## Beta diversity (mean Sorensen to queen-contiguous neighbours)
-  pa_mat <- (sp_mat > 0) * 1L
   row_lookup <- setNames(seq_along(cell_ids_wide), cell_ids_wide)
   beta_vals <- rep(NA_real_, nrow(pa_mat))
   for (i in seq_len(nrow(pa_mat))) {
@@ -1296,18 +1343,18 @@ compute_grid_metrics <- function(df, realm_label) {
   }
   beta_div <- tibble(cell_id = cell_ids_wide, beta_diversity = beta_vals)
 
-  ## Community composition similarity (mean Jaccard to all other cells)
+  ## Community composition similarity (mean Sorensen to all other cells)
   if (nrow(pa_mat) >= 2) {
-    jaccard_dist <- vegan::vegdist(pa_mat, method = "bray", binary = TRUE)
-    jaccard_sim  <- 1 - as.matrix(jaccard_dist)
-    diag(jaccard_sim) <- NA
-    mean_similarity <- rowMeans(jaccard_sim, na.rm = TRUE)
+    sorensen_dist <- vegan::vegdist(pa_mat, method = "bray", binary = TRUE)
+    sorensen_sim  <- 1 - as.matrix(sorensen_dist)
+    diag(sorensen_sim) <- NA
+    mean_similarity <- rowMeans(sorensen_sim, na.rm = TRUE)
 
-    saveRDS(jaccard_sim,
+    saveRDS(sorensen_sim,
             sprintf("outputs/species/community_similarity_matrix_%s.rds",
                     realm_label))
-    cat(sprintf("  Saved %s Jaccard similarity matrix (%d x %d)\n",
-        realm_label, nrow(jaccard_sim), ncol(jaccard_sim)))
+    cat(sprintf("  Saved %s Sorensen similarity matrix (%d x %d)\n",
+        realm_label, nrow(sorensen_sim), ncol(sorensen_sim)))
   } else {
     mean_similarity <- NA_real_
   }
@@ -1329,7 +1376,6 @@ compute_grid_metrics <- function(df, realm_label) {
   metrics <- richness %>%
     left_join(effort, by = "cell_id") %>%
     left_join(temporal, by = "cell_id") %>%
-    left_join(completeness, by = "cell_id") %>%
     left_join(beta_div, by = "cell_id") %>%
     left_join(community_sim, by = "cell_id") %>%
     left_join(taxon_richness, by = "cell_id")
@@ -1484,22 +1530,7 @@ if (!is.null(grid_marine) && !is.null(grid_terrestrial)) {
   save_paired(p_rec_m, p_rec_t, "map1d_most_recent")
 }
 
-## --- 4. Sampling completeness (terrestrial only) ---
-if (!is.null(grid_terrestrial)) {
-  p_rare_t <- make_panel(grid_terrestrial, "rarefied_richness",
-                         "Rarefied\nrichness", "Terrestrial — Sampling Completeness",
-                         sprintf("Rarefied at n = %d",
-                                 grid_terrestrial$rarefy_n[1]),
-                         realm = "terrestrial", viridis_opt = "mako")
-  ggsave("figures/map1e_sampling_completeness.pdf", p_rare_t,
-         width = 10, height = 10, units = "in")
-  ggsave("figures/map1e_sampling_completeness.png", p_rare_t,
-         width = 10, height = 10, units = "in", dpi = 300)
-  cat("Saved: figures/map1e_sampling_completeness.pdf & .png\n")
-  print(p_rare_t)
-}
-
-## --- 5. Beta diversity (mean Jaccard to neighbours) ---
+## --- 4. Beta diversity (mean Sorensen to neighbours) ---
 if (!is.null(grid_marine) && !is.null(grid_terrestrial)) {
   p_beta_m <- make_panel(grid_marine, "beta_diversity",
                          "Beta\ndiversity", "Marine — Beta Diversity",
@@ -1509,10 +1540,10 @@ if (!is.null(grid_marine) && !is.null(grid_terrestrial)) {
                          "Beta\ndiversity", "Terrestrial — Beta Diversity",
                          "Mean Sorensen dissimilarity to neighbours",
                          realm = "terrestrial", viridis_opt = "turbo")
-  save_paired(p_beta_m, p_beta_t, "map1f_beta_diversity")
+  save_paired(p_beta_m, p_beta_t, "map1e_beta_diversity")
 }
 
-## --- 6. Community composition similarity ---
+## --- 5. Community composition similarity ---
 if (!is.null(grid_marine) && !is.null(grid_terrestrial)) {
   p_sim_m <- make_panel(grid_marine, "community_similarity",
                         "Mean\nsimilarity", "Marine — Community Similarity",
@@ -1522,11 +1553,11 @@ if (!is.null(grid_marine) && !is.null(grid_terrestrial)) {
                         "Mean\nsimilarity", "Terrestrial — Community Similarity",
                         "Mean Sorensen similarity to all other cells",
                         realm = "terrestrial", viridis_opt = "cividis")
-  save_paired(p_sim_m, p_sim_t, "map1g_community_similarity")
+  save_paired(p_sim_m, p_sim_t, "map1f_community_similarity")
 }
 
-## --- 7. Taxonomic group breakdown ---
-## Identify the top phyla in each realm and produce per-phylum richness maps
+## --- 6. Taxonomic group breakdown ---
+## Per-phylum richness maps for the top 6 phyla in each realm
 make_taxon_panels <- function(grid_sf, df_records, realm_label) {
   realm_records <- df_records %>%
     filter(realm == realm_label, !is.na(phylum), phylum != "")
@@ -1550,7 +1581,7 @@ make_taxon_panels <- function(grid_sf, df_records, realm_label) {
   n_panels <- length(panels)
   ncols <- min(3L, n_panels)
   p_grid <- plot_grid(plotlist = panels, ncol = ncols)
-  fname <- sprintf("map1h_taxon_breakdown_%s", realm_label)
+  fname <- sprintf("map1g_taxon_breakdown_%s", realm_label)
   h <- if (n_panels <= 3) 8 else 16
   ggsave(paste0("figures/", fname, ".pdf"), p_grid,
          width = 16, height = h, units = "in")
@@ -1577,6 +1608,81 @@ gc()
 
 cat("\n========== MAP 2: INNS OCCURRENCES ==========\n\n")
 
+## --- 6a. Taxonomic resolution of INNS names ---
+## Marine species via WoRMS, terrestrial/freshwater via GBIF backbone
+cat("Resolving INNS marine names via WoRMS...\n")
+marine_inns_idx <- which(inns_list$realm == "Marine")
+for (i in marine_inns_idx) {
+  nm <- inns_list$latin_name[i]
+  tryCatch({
+    res <- worrms::wm_records_names(nm, marine_only = FALSE)[[1]]
+    if (!is.null(res) && nrow(res) > 0) {
+      best <- res %>%
+        filter(status %in% c("accepted", "valid") | !is.na(valid_AphiaID)) %>%
+        slice(1)
+      if (nrow(best) == 0) best <- slice(res, 1)
+      if (!is.na(best$valid_name) && best$valid_name != nm) {
+        cat(sprintf("  %s -> %s\n", nm, best$valid_name))
+        inns_list$latin_name[i] <- best$valid_name
+      }
+    }
+    Sys.sleep(0.3)
+  }, error = function(e) cat(sprintf("  WoRMS error for %s: %s\n", nm, e$message)))
+}
+
+cat("Resolving INNS terrestrial/freshwater names via GBIF backbone...\n")
+tf_inns_idx <- which(inns_list$realm %in% c("Terrestrial", "Freshwater"))
+for (i in tf_inns_idx) {
+  nm <- inns_list$latin_name[i]
+  tryCatch({
+    bb <- rgbif::name_backbone(name = nm, rank = "species", strict = FALSE)
+    if (!is.null(bb) && "species" %in% names(bb) && !is.na(bb$species) &&
+        bb$species != nm) {
+      cat(sprintf("  %s -> %s\n", nm, bb$species))
+      inns_list$latin_name[i] <- bb$species
+    }
+  }, error = function(e) cat(sprintf("  GBIF error for %s: %s\n", nm, e$message)))
+}
+
+## --- Resolve indicator names ---
+## Try WoRMS first; if no match, fall back to GBIF backbone.
+## This avoids assuming which habitats are marine — saltmarsh species
+## may be terrestrial plants that WoRMS doesn't cover.
+cat("Resolving indicator names (WoRMS then GBIF backbone fallback)...\n")
+for (i in seq_len(nrow(indicator_list))) {
+  nm <- indicator_list$latin_name[i]
+  resolved <- FALSE
+  tryCatch({
+    res <- worrms::wm_records_names(nm, marine_only = FALSE)[[1]]
+    if (!is.null(res) && nrow(res) > 0) {
+      best <- res %>%
+        filter(status %in% c("accepted", "valid") | !is.na(valid_AphiaID)) %>%
+        slice(1)
+      if (nrow(best) == 0) best <- slice(res, 1)
+      if (!is.na(best$valid_name) && best$valid_name != nm) {
+        cat(sprintf("  WoRMS: %s -> %s\n", nm, best$valid_name))
+        indicator_list$latin_name[i] <- best$valid_name
+      }
+      resolved <- TRUE
+    }
+    Sys.sleep(0.3)
+  }, error = function(e) {})
+
+  if (!resolved) {
+    tryCatch({
+      bb <- rgbif::name_backbone(name = nm, rank = "species", strict = FALSE)
+      if (!is.null(bb) && "species" %in% names(bb) && !is.na(bb$species) &&
+          bb$species != nm) {
+        cat(sprintf("  GBIF: %s -> %s\n", nm, bb$species))
+        indicator_list$latin_name[i] <- bb$species
+      }
+    }, error = function(e) cat(sprintf("  No match for %s\n", nm)))
+  }
+}
+
+cat("Taxonomic resolution complete.\n\n")
+
+## --- 6b. Query all INNS across all three realms ---
 inns_names <- unique(inns_list$latin_name)
 
 inns_gbif <- query_gbif(inns_names, wkt = scamp_wkt)
@@ -1587,7 +1693,46 @@ inns_records <- bind_rows(inns_gbif, inns_obis, inns_nbn) %>%
   filter(!is.na(latitude), !is.na(longitude)) %>%
   cc_clean() %>%
   deduplicate_records() %>%
-  left_join(inns_list %>% select(latin_name, common_name), by = "latin_name")
+  left_join(inns_list %>% select(latin_name, common_name, realm, source_list),
+            by = "latin_name")
+
+## --- 6c. Build combined summary table ---
+inns_year_summary <- inns_records %>%
+  group_by(latin_name) %>%
+  summarise(
+    n_records = n(),
+    most_recent_year = max(year, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+inns_summary <- inns_list %>%
+  select(latin_name, common_name, realm, source_list) %>%
+  left_join(inns_year_summary, by = "latin_name") %>%
+  mutate(
+    n_records = replace_na(n_records, 0L),
+    most_recent_year = replace_na(most_recent_year, NA_integer_),
+    present_in_solway = n_records > 0
+  ) %>%
+  arrange(realm, desc(n_records))
+
+cat("\nINNS summary (all realms):\n")
+print(inns_summary, n = Inf)
+cat(sprintf("\nTotal: %d species on list, %d with records in Solway\n",
+    nrow(inns_summary), sum(inns_summary$present_in_solway)))
+
+## --- 6d. Validate: keep marine list intact, filter terrestrial/freshwater ---
+## Marine INNS stay on the watch list regardless of records.
+## Terrestrial and freshwater species without records are dropped.
+inns_validated <- inns_summary %>%
+  filter(realm == "Marine" | present_in_solway)
+
+write_csv(inns_validated, "data/processed/species/inns_validated_solway.csv")
+cat(sprintf("Validated INNS list: %d species saved to data/processed/species/inns_validated_solway.csv\n",
+    nrow(inns_validated)))
+
+## --- 6e. Filter spatial records to validated species only ---
+inns_records <- inns_records %>%
+  filter(latin_name %in% inns_validated$latin_name)
 
 if (nrow(inns_records) > 0) {
   inns_sf <- inns_records %>%
@@ -1595,52 +1740,349 @@ if (nrow(inns_records) > 0) {
   st_write(inns_sf, "outputs/species/inns_records.gpkg", delete_dsn = TRUE)
 }
 
-cat(sprintf("INNS: %d records across %d species\n",
+cat(sprintf("INNS records (validated): %d records across %d species\n",
     nrow(inns_records), n_distinct(inns_records$latin_name)))
 
-## INNS summary
-inns_summary <- inns_list %>%
-  left_join(
-    inns_records %>% count(latin_name, name = "n_records"),
-    by = "latin_name"
-  ) %>%
-  mutate(n_records = replace_na(n_records, 0L)) %>%
-  arrange(desc(n_records))
+## --- 6f. Per-species maps (year of record) ---
+for (realm_dir in c("marine", "terrestrial", "freshwater")) {
+  dir.create(file.path("figures/inns_species", realm_dir),
+             showWarnings = FALSE, recursive = TRUE)
+}
 
-cat("\nINNS presence in Solway:\n")
-print(inns_summary, n = Inf)
-
-## Plot INNS occurrences — points coloured by species on SCAMP AOI background
 if (nrow(inns_records) > 0) {
-  p_inns <- ggplot() +
-    geom_sf(data = las_dg_bng, fill = "grey90", colour = "grey50", linewidth = 0.3) +
-    geom_sf(data = scamp_aoi_sf, fill = NA, colour = "black", linewidth = 0.5) +
-    geom_sf(data = inns_sf, aes(colour = common_name), size = 1.5, alpha = 0.7) +
-    scale_colour_brewer(palette = "Set3", name = "INNS Species") +
+  inns_sf_bng <- st_transform(inns_sf, 27700)
+  species_with_records <- inns_records %>%
+    distinct(latin_name, common_name, realm) %>%
+    filter(!is.na(latin_name))
+
+  for (r in seq_len(nrow(species_with_records))) {
+    sp_latin  <- species_with_records$latin_name[r]
+    sp_common <- species_with_records$common_name[r]
+    sp_realm  <- species_with_records$realm[r]
+    sp_data   <- inns_sf_bng %>% filter(latin_name == sp_latin)
+    if (nrow(sp_data) == 0) next
+
+    sp_label <- if (!is.na(sp_common)) sp_common else sp_latin
+    parts <- strsplit(sp_latin, "\\s+")[[1]]
+    sp_abbrev <- if (length(parts) >= 2) {
+      paste0(tolower(substr(parts[1], 1, 1)), ". ",
+             paste(parts[-1], collapse = " "))
+    } else {
+      sp_latin
+    }
+
+    common_clean <- gsub("[^a-zA-Z0-9]", "_", tolower(
+      if (!is.na(sp_common)) sp_common else "unknown"))
+    abbrev_clean <- gsub("[^a-zA-Z0-9]", "_", tolower(sp_abbrev))
+    fname <- sprintf("%s_%s", common_clean, abbrev_clean)
+    realm_folder <- tolower(if (!is.na(sp_realm)) sp_realm else "terrestrial")
+
+    p_sp <- ggplot() +
+      geom_sf(data = las_dg_bng, fill = "grey90", colour = "grey50",
+              linewidth = 0.3) +
+      geom_sf(data = scamp_aoi_bng, fill = NA, colour = "black",
+              linewidth = 0.5) +
+      geom_sf(data = scamp_coastline, colour = "grey30", linewidth = 0.3) +
+      geom_sf(data = sp_data, aes(colour = year), size = 2, alpha = 0.8) +
+      scale_colour_viridis_c(option = "plasma", name = "Year",
+                              direction = 1, na.value = "grey60") +
+      annotation_scale(location = "bl", width_hint = 0.25,
+                       style = "ticks", line_width = 0.5) +
+      annotation_north_arrow(location = "tr", which_north = "true",
+                             height = unit(1, "cm"), width = unit(1, "cm"),
+                             style = north_arrow_minimal) +
+      labs(title = sprintf("%s (%s)", sp_label, sp_abbrev),
+           subtitle = sprintf("%s — %d records", sp_latin, nrow(sp_data))) +
+      map_theme +
+      coord_sf(crs = 27700)
+
+    ggsave(sprintf("figures/inns_species/%s/%s.png", realm_folder, fname),
+           p_sp, width = 10, height = 10, units = "in", dpi = 300)
+  }
+  cat(sprintf("Saved %d per-species INNS maps to figures/inns_species/{marine,terrestrial,freshwater}/\n",
+      nrow(species_with_records)))
+}
+
+## --- 6g. INNS richness per grid cell (split by realm) ---
+if (nrow(inns_records) > 0) {
+  inns_gridded <- st_join(
+    st_transform(inns_sf, 4326),
+    grid_osgb,
+    join = st_within
+  ) %>%
+    st_drop_geometry() %>%
+    filter(!is.na(cell_id))
+
+  inns_realm_panels <- list()
+  for (rlm in c("Marine", "Terrestrial", "Freshwater")) {
+    rlm_data <- inns_gridded %>% filter(realm == rlm)
+    if (nrow(rlm_data) == 0) next
+
+    rlm_per_cell <- rlm_data %>%
+      group_by(cell_id) %>%
+      summarise(n_inns_species = n_distinct(latin_name), .groups = "drop")
+
+    rlm_grid <- grid_osgb %>%
+      left_join(rlm_per_cell, by = "cell_id") %>%
+      filter(!is.na(n_inns_species)) %>%
+      st_transform(27700)
+
+    clip_boundary <- if (rlm == "Marine") smr_solway_bng else las_dg_bng
+    bg_fill  <- if (rlm == "Marine") "lightblue" else "grey90"
+    bg_color <- if (rlm == "Marine") "steelblue" else "grey50"
+
+    p <- ggplot() +
+      geom_sf(data = clip_boundary, fill = bg_fill, colour = bg_color,
+              linewidth = 0.3) +
+      geom_sf(data = rlm_grid, aes(fill = n_inns_species), colour = NA) +
+      geom_sf(data = scamp_aoi_bng, fill = NA, colour = "black",
+              linewidth = 0.5) +
+      geom_sf(data = scamp_coastline, colour = "grey30", linewidth = 0.3) +
+      scale_fill_viridis_c(option = "rocket", name = "INNS\nspecies",
+                            direction = -1) +
+      annotation_scale(location = "bl", width_hint = 0.25,
+                       style = "ticks", line_width = 0.5) +
+      annotation_north_arrow(location = "tr", which_north = "true",
+                             height = unit(1, "cm"), width = unit(1, "cm"),
+                             style = north_arrow_minimal) +
+      labs(title = sprintf("%s INNS Richness", rlm),
+           subtitle = sprintf("%d species, %d cells",
+                              n_distinct(rlm_data$latin_name),
+                              nrow(rlm_grid))) +
+      map_theme +
+      coord_sf(crs = 27700)
+
+    inns_realm_panels[[rlm]] <- p
+  }
+
+  if (length(inns_realm_panels) > 0) {
+    p_inns_realms <- plot_grid(
+      plotlist = inns_realm_panels,
+      ncol = min(3L, length(inns_realm_panels)),
+      labels = names(inns_realm_panels),
+      label_size = 11
+    )
+    ggsave("figures/map2a_inns_richness_grid.pdf", p_inns_realms,
+           width = 16, height = 10, units = "in")
+    ggsave("figures/map2a_inns_richness_grid.png", p_inns_realms,
+           width = 16, height = 10, units = "in", dpi = 300)
+    cat("Saved: figures/map2a_inns_richness_grid.pdf & .png\n")
+    print(p_inns_realms)
+  }
+}
+
+## --- 6h. Year of first INNS detection per grid cell ---
+if (nrow(inns_records) > 0) {
+  inns_first_cell <- inns_gridded %>%
+    filter(!is.na(year)) %>%
+    group_by(cell_id) %>%
+    summarise(first_detection_year = min(year), .groups = "drop")
+
+  first_det_grid <- grid_osgb %>%
+    left_join(inns_first_cell, by = "cell_id") %>%
+    filter(!is.na(first_detection_year)) %>%
+    st_transform(27700)
+
+  p_first_det <- ggplot() +
+    geom_sf(data = las_dg_bng, fill = "grey90", colour = "grey50",
+            linewidth = 0.3) +
+    geom_sf(data = smr_solway_bng, fill = "lightblue", colour = "steelblue",
+            linewidth = 0.3) +
+    geom_sf(data = first_det_grid, aes(fill = first_detection_year),
+            colour = NA) +
+    geom_sf(data = scamp_aoi_bng, fill = NA, colour = "black",
+            linewidth = 0.5) +
+    geom_sf(data = scamp_coastline, colour = "grey30", linewidth = 0.3) +
+    scale_fill_viridis_c(option = "plasma", name = "First\ndetection\nyear",
+                          direction = 1) +
     annotation_scale(location = "bl", width_hint = 0.25,
                      style = "ticks", line_width = 0.5) +
     annotation_north_arrow(location = "tr", which_north = "true",
                            height = unit(1, "cm"), width = unit(1, "cm"),
                            style = north_arrow_minimal) +
-    labs(title = "INNS Occurrence Records",
-         subtitle = "Invasive Non-Native Species in SCAMP AOI") +
-    theme_minimal(base_size = 10) +
-    theme(
-      legend.position  = "right",
-      legend.key.size  = unit(0.4, "cm"),
-      legend.text      = element_text(size = 7),
-      plot.title       = element_text(size = 12, face = "bold"),
-      plot.subtitle    = element_text(size = 9, colour = "grey30"),
-      panel.grid.major = element_line(colour = "grey85", linewidth = 0.2)
-    ) +
+    labs(title = "Year of First INNS Detection per 5 km Grid Cell",
+         subtitle = "Earliest year any INNS species was recorded") +
+    map_theme +
     coord_sf(crs = 27700)
 
-  ggsave("figures/map2_inns_occurrences.pdf", p_inns,
-         width = 16, height = 10, units = "in")
-  ggsave("figures/map2_inns_occurrences.png", p_inns,
-         width = 16, height = 10, units = "in", dpi = 300)
-  cat("Saved: figures/map2_inns_occurrences.pdf & .png\n")
-  print(p_inns)
+  dir.create("outputs/species/figures", showWarnings = FALSE, recursive = TRUE)
+  ggsave("outputs/species/figures/inns_first_detection.png", p_first_det,
+         width = 12, height = 10, units = "in", dpi = 300)
+  cat("Saved: outputs/species/figures/inns_first_detection.png\n")
+  print(p_first_det)
+}
+
+## --- 6i. Cumulative INNS spread — small multiples ---
+if (nrow(inns_records) > 0) {
+  if (!requireNamespace("patchwork", quietly = TRUE)) install.packages("patchwork")
+  library(patchwork)
+
+  inns_grid_years <- inns_gridded %>%
+    filter(!is.na(year)) %>%
+    group_by(cell_id) %>%
+    summarise(
+      first_year  = min(year),
+      n_species   = n_distinct(latin_name),
+      .groups = "drop"
+    )
+
+  time_bands <- list(
+    "Pre-2000"      = c(-Inf, 1999),
+    "2000–2009" = c(2000, 2009),
+    "2010–2019" = c(2010, 2019),
+    "2020–present" = c(2020, Inf)
+  )
+
+  cum_cells  <- integer(length(time_bands))
+  cum_spp    <- integer(length(time_bands))
+  band_panels <- list()
+
+  for (b in seq_along(time_bands)) {
+    band_name <- names(time_bands)[b]
+    band_end  <- time_bands[[b]][2]
+    band_start <- time_bands[[b]][1]
+
+    cumulative_ids <- inns_grid_years %>%
+      filter(first_year <= band_end) %>%
+      pull(cell_id)
+    new_ids <- inns_grid_years %>%
+      filter(first_year >= band_start, first_year <= band_end) %>%
+      pull(cell_id)
+
+    cum_spp_count <- inns_gridded %>%
+      filter(!is.na(year), year <= band_end) %>%
+      summarise(n = n_distinct(latin_name)) %>%
+      pull(n)
+
+    cum_cells[b]  <- length(cumulative_ids)
+    cum_spp[b]    <- cum_spp_count
+
+    band_grid <- grid_osgb %>%
+      filter(cell_id %in% cumulative_ids) %>%
+      mutate(status = if_else(cell_id %in% new_ids,
+                              "New", "Previously occupied")) %>%
+      st_transform(27700)
+
+    p <- ggplot() +
+      geom_sf(data = las_dg_bng, fill = "grey95", colour = "grey70",
+              linewidth = 0.2) +
+      geom_sf(data = smr_solway_bng, fill = "aliceblue",
+              colour = "grey70", linewidth = 0.2)
+
+    prev_data <- band_grid %>% filter(status == "Previously occupied")
+    new_data  <- band_grid %>% filter(status == "New")
+    if (nrow(prev_data) > 0) {
+      p <- p + geom_sf(data = prev_data, fill = "grey70", colour = NA)
+    }
+    if (nrow(new_data) > 0) {
+      p <- p + geom_sf(data = new_data, fill = "#d7191c", colour = NA)
+    }
+
+    p <- p +
+      geom_sf(data = scamp_aoi_bng, fill = NA, colour = "black",
+              linewidth = 0.5) +
+      geom_sf(data = scamp_coastline, colour = "grey30", linewidth = 0.3) +
+      labs(title = band_name,
+           subtitle = sprintf("%d cells, %d INNS species (cumulative)",
+                              length(cumulative_ids), cum_spp_count)) +
+      map_theme +
+      theme(plot.title = element_text(size = 11, face = "bold"),
+            plot.subtitle = element_text(size = 8)) +
+      coord_sf(crs = 27700)
+
+    band_panels[[b]] <- p
+  }
+
+  inset_df <- tibble(
+    band     = seq_along(time_bands),
+    label    = names(time_bands),
+    cells    = cum_cells
+  )
+
+  p_inset <- ggplot(inset_df, aes(x = band, y = cells)) +
+    geom_line(colour = "#d7191c", linewidth = 0.8) +
+    geom_point(colour = "#d7191c", size = 2) +
+    scale_x_continuous(breaks = seq_along(time_bands),
+                       labels = names(time_bands)) +
+    labs(x = NULL, y = "Cells") +
+    theme_minimal(base_size = 7) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1),
+          panel.grid.minor = element_blank(),
+          plot.background = element_rect(fill = "white", colour = "grey60",
+                                         linewidth = 0.3))
+
+  band_panels[[length(time_bands)]] <- band_panels[[length(time_bands)]] +
+    inset_element(p_inset, left = 0.55, bottom = 0.02, right = 0.98, top = 0.38)
+
+  p_spread <- wrap_plots(band_panels, ncol = 2) +
+    plot_annotation(
+      title = "Cumulative INNS Spread across SCAMP AOI",
+      subtitle = "Grey = previously occupied cells, red = newly occupied in this time band",
+      theme = theme(
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 10, colour = "grey30")
+      )
+    )
+
+  ggsave("outputs/species/figures/inns_cumulative_spread.png", p_spread,
+         width = 16, height = 14, units = "in", dpi = 300)
+  cat("Saved: outputs/species/figures/inns_cumulative_spread.png\n")
+  print(p_spread)
+}
+
+## --- 6j. Temporal trend — cumulative INNS records by year ---
+if (nrow(inns_records) > 0) {
+  inns_cumulative <- inns_records %>%
+    filter(!is.na(year)) %>%
+    count(year, name = "n_records") %>%
+    arrange(year) %>%
+    mutate(cumulative = cumsum(n_records))
+
+  inns_first_detections <- inns_records %>%
+    filter(!is.na(year)) %>%
+    group_by(latin_name) %>%
+    summarise(first_year = min(year), .groups = "drop") %>%
+    count(first_year, name = "new_species") %>%
+    arrange(first_year) %>%
+    mutate(cumulative_species = cumsum(new_species))
+
+  p_trend <- ggplot() +
+    geom_area(data = inns_cumulative,
+              aes(x = year, y = cumulative),
+              fill = "#d95f02", alpha = 0.3) +
+    geom_line(data = inns_cumulative,
+              aes(x = year, y = cumulative),
+              colour = "#d95f02", linewidth = 1) +
+    geom_step(data = inns_first_detections,
+              aes(x = first_year,
+                  y = cumulative_species * max(inns_cumulative$cumulative) /
+                      max(inns_first_detections$cumulative_species)),
+              colour = "#1b9e77", linewidth = 0.8, linetype = "dashed") +
+    scale_y_continuous(
+      name = "Cumulative records",
+      sec.axis = sec_axis(
+        ~ . * max(inns_first_detections$cumulative_species) /
+              max(inns_cumulative$cumulative),
+        name = "Cumulative INNS species detected"
+      )
+    ) +
+    labs(title = "INNS Detection Trend in SCAMP AOI",
+         subtitle = "Orange = cumulative records, green dashed = cumulative species first detected",
+         x = "Year") +
+    theme_minimal(base_size = 11) +
+    theme(
+      plot.title    = element_text(size = 13, face = "bold"),
+      plot.subtitle = element_text(size = 9, colour = "grey30"),
+      axis.title.y.left  = element_text(colour = "#d95f02"),
+      axis.title.y.right = element_text(colour = "#1b9e77")
+    )
+
+  ggsave("figures/map2b_inns_temporal_trend.pdf", p_trend,
+         width = 12, height = 7, units = "in")
+  ggsave("figures/map2b_inns_temporal_trend.png", p_trend,
+         width = 12, height = 7, units = "in", dpi = 300)
+  cat("Saved: figures/map2b_inns_temporal_trend.pdf & .png\n")
+  print(p_trend)
 }
 
 rm(inns_gbif, inns_obis, inns_nbn); gc()
@@ -1727,6 +2169,210 @@ if (nrow(indicator_records) > 0) {
          width = 16, height = 12, units = "in", dpi = 300)
   cat("Saved: figures/map3_indicator_species.pdf & .png\n")
   print(p_indicators)
+}
+
+## --- 7a. Validated indicator list CSV ---
+indicator_year_summary <- indicator_records %>%
+  group_by(latin_name) %>%
+  summarise(
+    n_records = n(),
+    most_recent_year = max(year, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+habitat_builders <- c(
+  "Zostera marina", "Zostera noltii",
+  "Ostrea edulis",
+  "Salicornia europaea", "Puccinellia maritima", "Atriplex portulacoides",
+  "Armeria maritima", "Limonium vulgare", "Phragmites australis",
+  "Ammophila arenaria", "Elytrigia juncea", "Leymus arenarius"
+)
+
+indicator_validated <- indicator_list %>%
+  left_join(indicator_year_summary, by = "latin_name") %>%
+  mutate(
+    n_records = replace_na(n_records, 0L),
+    most_recent_year = if_else(is.finite(most_recent_year),
+                               most_recent_year, NA_integer_),
+    present_in_solway = n_records > 0,
+    functional_group = if_else(latin_name %in% habitat_builders,
+                               "habitat_builder", "associated_community")
+  ) %>%
+  select(latin_name, common_name, habitat, functional_group,
+         n_records, most_recent_year, present_in_solway) %>%
+  arrange(habitat, functional_group, desc(n_records))
+
+write_csv(indicator_validated,
+          "outputs/species/indicator_species_validated.csv")
+cat(sprintf("Saved: outputs/species/indicator_species_validated.csv (%d species)\n",
+    nrow(indicator_validated)))
+
+## --- 7b. Indicator density grid (cell + adjacent, last 5 years) ---
+if (nrow(indicator_records) > 0) {
+  ind_realm <- case_when(
+    indicator_records$habitat %in% c("Seagrass", "Oyster") ~ "marine",
+    TRUE ~ "terrestrial"
+  )
+  indicator_records$realm <- ind_realm
+
+  ind_sf_grid <- st_join(
+    indicator_sf %>% st_transform(st_crs(grid_osgb)),
+    grid_osgb,
+    join = st_within
+  ) %>%
+    st_drop_geometry() %>%
+    filter(!is.na(cell_id))
+
+  ind_recent <- ind_sf_grid %>%
+    filter(!is.na(year), year >= 2021) %>%
+    left_join(indicator_validated %>% select(latin_name, functional_group),
+              by = "latin_name")
+
+  cell_ids_all <- grid_osgb$cell_id
+  nb_list <- st_touches(grid_osgb)
+
+  compute_density <- function(df_fg, label) {
+    if (nrow(df_fg) == 0) return(tibble(cell_id = integer(), n_indicator = integer()))
+    sp_by_cell <- df_fg %>%
+      group_by(cell_id) %>%
+      summarise(species = list(unique(latin_name)), .groups = "drop")
+    sp_lookup <- setNames(sp_by_cell$species, sp_by_cell$cell_id)
+
+    density_out <- tibble(cell_id = cell_ids_all, n_indicator = 0L)
+    for (idx in seq_along(cell_ids_all)) {
+      cid <- cell_ids_all[idx]
+      nb_ids <- cell_ids_all[nb_list[[idx]]]
+      focal_plus_nb <- c(as.character(cid), as.character(nb_ids))
+      spp <- unique(unlist(sp_lookup[focal_plus_nb]))
+      density_out$n_indicator[idx] <- length(spp)
+    }
+    density_out %>% filter(n_indicator > 0)
+  }
+
+  dens_builders  <- compute_density(
+    ind_recent %>% filter(functional_group == "habitat_builder"),
+    "habitat_builder")
+  dens_community <- compute_density(
+    ind_recent %>% filter(functional_group == "associated_community"),
+    "associated_community")
+
+  grid_dens_builders <- grid_osgb %>%
+    left_join(dens_builders, by = "cell_id") %>%
+    filter(!is.na(n_indicator))
+  grid_dens_community <- grid_osgb %>%
+    left_join(dens_community, by = "cell_id") %>%
+    filter(!is.na(n_indicator))
+
+  st_write(grid_dens_builders, "outputs/species/indicator_density_grid.gpkg",
+           layer = "habitat_builders", delete_layer = TRUE)
+  st_write(grid_dens_community, "outputs/species/indicator_density_grid.gpkg",
+           layer = "associated_community", delete_layer = TRUE)
+  cat("Saved: outputs/species/indicator_density_grid.gpkg (2 layers)\n")
+
+  for (rlm in c("marine", "terrestrial")) {
+    clip_boundary <- if (rlm == "marine") smr_solway_bng else las_dg_bng
+    bg_fill  <- if (rlm == "marine") "lightblue" else "grey90"
+    bg_color <- if (rlm == "marine") "steelblue" else "grey50"
+
+    rlm_habitats <- if (rlm == "marine") c("Seagrass", "Oyster") else
+                    c("Saltmarsh", "Sand dunes", "Woodland")
+    rlm_species <- indicator_validated %>%
+      filter(habitat %in% rlm_habitats) %>% pull(latin_name)
+
+    rlm_builders <- ind_recent %>%
+      filter(functional_group == "habitat_builder",
+             latin_name %in% rlm_species) %>%
+      pull(cell_id) %>% unique()
+    rlm_community <- ind_recent %>%
+      filter(functional_group == "associated_community",
+             latin_name %in% rlm_species) %>%
+      pull(cell_id) %>% unique()
+
+    for (fg in c("habitat_builder", "associated_community")) {
+      fg_grid <- if (fg == "habitat_builder") grid_dens_builders else grid_dens_community
+      fg_cells <- if (fg == "habitat_builder") rlm_builders else rlm_community
+      fg_grid_rlm <- fg_grid %>% filter(cell_id %in% c(
+        fg_cells,
+        unlist(lapply(which(cell_ids_all %in% fg_cells),
+                      function(i) cell_ids_all[nb_list[[i]]]))))
+
+      if (nrow(fg_grid_rlm) == 0) next
+
+      fg_label <- gsub("_", " ", fg)
+      p <- make_panel(fg_grid_rlm, "n_indicator", "Indicator\nspecies",
+                      sprintf("%s — %s", tools::toTitleCase(rlm),
+                              tools::toTitleCase(fg_label)),
+                      "Distinct species in cell + neighbours (2021+)",
+                      realm = rlm, viridis_opt = "mako")
+      fname <- sprintf("map3a_indicator_density_%s_%s", fg, rlm)
+      ggsave(sprintf("figures/%s.png", fname), p,
+             width = 10, height = 10, units = "in", dpi = 300)
+      cat(sprintf("Saved: figures/%s.png\n", fname))
+    }
+  }
+}
+
+## --- 7c. Habitat-builder occurrence maps ---
+dir.create("figures/indicator_species/habitat_builders",
+           showWarnings = FALSE, recursive = TRUE)
+
+if (nrow(indicator_records) > 0) {
+  builder_records <- indicator_records %>%
+    filter(latin_name %in% habitat_builders)
+  builder_with_records <- builder_records %>%
+    distinct(latin_name, common_name, habitat) %>%
+    filter(!is.na(latin_name))
+
+  if (nrow(builder_with_records) > 0) {
+    ind_sf_bng <- st_transform(indicator_sf, 27700)
+
+    for (r in seq_len(nrow(builder_with_records))) {
+      sp_latin  <- builder_with_records$latin_name[r]
+      sp_common <- builder_with_records$common_name[r]
+      sp_data   <- ind_sf_bng %>% filter(latin_name == sp_latin)
+      if (nrow(sp_data) == 0) next
+
+      parts <- strsplit(sp_latin, "\\s+")[[1]]
+      sp_abbrev <- if (length(parts) >= 2) {
+        paste0(tolower(substr(parts[1], 1, 1)), ". ",
+               paste(parts[-1], collapse = " "))
+      } else {
+        sp_latin
+      }
+
+      sp_label <- if (!is.na(sp_common)) sp_common else sp_latin
+      common_clean <- gsub("[^a-zA-Z0-9]", "_", tolower(
+        if (!is.na(sp_common)) sp_common else "unknown"))
+      abbrev_clean <- gsub("[^a-zA-Z0-9]", "_", tolower(sp_abbrev))
+      fname <- sprintf("%s_%s", common_clean, abbrev_clean)
+
+      p_sp <- ggplot() +
+        geom_sf(data = las_dg_bng, fill = "grey90", colour = "grey50",
+                linewidth = 0.3) +
+        geom_sf(data = smr_solway_bng, fill = "lightblue",
+                colour = "steelblue", linewidth = 0.3) +
+        geom_sf(data = scamp_aoi_bng, fill = NA, colour = "black",
+                linewidth = 0.5) +
+        geom_sf(data = scamp_coastline, colour = "grey30", linewidth = 0.3) +
+        geom_sf(data = sp_data, aes(colour = year), size = 2, alpha = 0.8) +
+        scale_colour_viridis_c(option = "plasma", name = "Year",
+                                direction = 1, na.value = "grey60") +
+        annotation_scale(location = "bl", width_hint = 0.25,
+                         style = "ticks", line_width = 0.5) +
+        annotation_north_arrow(location = "tr", which_north = "true",
+                               height = unit(1, "cm"), width = unit(1, "cm"),
+                               style = north_arrow_minimal) +
+        labs(title = sprintf("%s (%s)", sp_label, sp_abbrev),
+             subtitle = sprintf("%s — %d records", sp_latin, nrow(sp_data))) +
+        map_theme +
+        coord_sf(crs = 27700)
+
+      ggsave(sprintf("figures/indicator_species/habitat_builders/%s.png", fname),
+             p_sp, width = 10, height = 10, units = "in", dpi = 300)
+    }
+    cat(sprintf("Saved %d habitat-builder maps to figures/indicator_species/habitat_builders/\n",
+        nrow(builder_with_records)))
+  }
 }
 
 rm(ind_gbif, ind_obis, ind_nbn); gc()
@@ -1853,7 +2499,7 @@ rm(gems_points, gems_polys, gems_pts_sf, gems_polys_clip); gc()
 cat("\n========== COMBINED SUMMARY ==========\n\n")
 
 combined_summary <- bind_rows(
-  inns_summary %>% mutate(habitat = "Multiple") %>%
+  inns_validated %>% mutate(habitat = realm, category = "INNS") %>%
     select(latin_name, common_name, habitat, category, n_records),
   indicator_summary %>%
     select(latin_name, common_name, habitat, category, n_records),
