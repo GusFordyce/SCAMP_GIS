@@ -5,7 +5,7 @@
 ## Loads CMEMS reanalysis layers, crops to SCAMP AOI, and produces
 ## a Solway-specific seagrass potential layer using EA methodology.
 ##=====================================================================
-install.packages('elevatr')
+install.packages('whitebox')
 require(sf)
 require(terra)
 require(dplyr)
