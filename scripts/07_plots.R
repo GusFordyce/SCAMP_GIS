@@ -54,7 +54,8 @@ desig_files <- list(
   MPA    = "data/processed/boundaries/mpas_scamp.gpkg",
   NNR    = "data/processed/boundaries/nnr_scamp.gpkg",
   LNR    = "data/processed/boundaries/lnr_scamp.gpkg",
-  IBA    = "data/processed/boundaries/ibas_scamp.gpkg"
+  IBA    = "data/processed/boundaries/ibas_scamp.gpkg",
+  RSPB   = "data/processed/boundaries/rspb_reserves_scamp.gpkg"
 )
 desig_layers <- list()
 for (nm in names(desig_files)) {
@@ -121,37 +122,13 @@ save_plot <- function(p, filename, width = 10, height = 8, dpi = 300) {
   cat(sprintf("  Saved: %s\n", path))
 }
 
-# Cluster detection: 2km buffer, union, decompose — returns sf of bounding boxes
-# Replicates the approach from 03_habitats.R
-build_cluster_boxes <- function(sf_data, pad_m = 2000, merge_dist = 1000) {
-  if (nrow(sf_data) == 0) return(st_sf(name = character(), geometry = st_sfc(crs = 27700)))
-  centroids <- suppressWarnings(st_centroid(sf_data))
-  buf <- st_buffer(centroids, dist = 2000) %>% st_union() %>% st_cast("POLYGON")
-  ids <- st_intersects(centroids, buf)
-  sf_data$cluster <- sapply(ids, `[`, 1)
-
-  boxes <- do.call(rbind, lapply(sort(unique(sf_data$cluster)), function(cl) {
-    bb <- st_bbox(st_buffer(sf_data[which(sf_data$cluster == cl), ], dist = pad_m))
-    st_sf(
-      name = sprintf("Cluster %d", cl),
-      geometry = st_as_sfc(bb, crs = 27700)
-    )
-  }))
-
-  # Merge overlapping boxes
-  merge_buf <- st_buffer(boxes, dist = merge_dist) %>% st_union() %>%
-    st_cast("POLYGON")
-  grp <- sapply(st_intersects(boxes, merge_buf), `[`, 1)
-  boxes <- do.call(rbind, lapply(sort(unique(grp)), function(g) {
-    bb <- st_bbox(boxes[grp == g, ])
-    st_sf(name = sprintf("Cluster %d", g),
-          geometry = st_as_sfc(bb, crs = 27700))
-  }))
-
-  # Order west to east by centroid
-  boxes <- boxes[order(st_coordinates(suppressWarnings(st_centroid(boxes)))[, 1]), ]
-  boxes$name <- sprintf("Cluster %d", seq_len(nrow(boxes)))
-  boxes
+# Load cluster boxes saved by 03_habitats.R
+load_clusters <- function(path) {
+  if (!file.exists(path)) {
+    warning(sprintf("Cluster file not found: %s — run 03_habitats.R first", path))
+    return(st_sf(name = character(), geometry = st_sfc(crs = 27700)))
+  }
+  st_read(path, quiet = TRUE)
 }
 
 
@@ -218,14 +195,12 @@ sg_potential <- st_read("outputs/habitats/seagrass_potential_solway.gpkg", quiet
   st_transform(27700)
 
 ind_all <- st_read("outputs/species/indicator_records.gpkg", quiet = TRUE) %>%
-  st_transform(27700)
+  st_transform(st_crs(smr))
 sg_indicators <- ind_all[which(ind_all$habitat == "Seagrass"), ]
 sg_indicators <- sg_indicators[lengths(st_intersects(sg_indicators, smr)) > 0, ]
 cat(sprintf("  Seagrass indicators (within SMR): %d\n", nrow(sg_indicators)))
 
-# Build cluster boxes from all seagrass data (same approach as 03_habitats.R)
-sg_all_for_clusters <- bind_rows(sg_known, sg_potential) %>% st_make_valid()
-sg_boxes <- build_cluster_boxes(sg_all_for_clusters)
+sg_boxes <- load_clusters("data/processed/habitats/seagrass_cluster_boxes.gpkg")
 cat(sprintf("  Seagrass clusters: %d\n", nrow(sg_boxes)))
 
 # 2a. Combined: known + potential + indicators + harbour limits + cluster boxes
@@ -275,7 +250,7 @@ save_plot(p_sg_ind, "06_seagrass_indicators.png")
 # 2e. Seagrass cluster sub-plots (zoomed to each cluster box)
 for (i in seq_len(nrow(sg_boxes))) {
   bb <- st_bbox(sg_boxes[i, ])
-  p_cl <- base_map(sprintf("Seagrass — %s", sg_boxes$name[i]), zoom = 12) +
+  p_cl <- base_map(sprintf("Seagrass — %s", sg_boxes$name[i]), zoom = 13) +
     geom_sf(data = sg_potential, aes(fill = "Modelled potential"), colour = NA,
             alpha = 0.4) +
     geom_sf(data = sg_known, aes(fill = "Known extent"), colour = "#1b7837",
@@ -344,8 +319,7 @@ sm_known <- st_read("data/processed/species/saltmarsh_harmonised.gpkg", quiet = 
 sm_ind <- st_read("data/processed/species/saltmarsh_indicator_points.gpkg", quiet = TRUE) %>%
   st_transform(27700)
 
-# Build saltmarsh cluster boxes
-sm_boxes <- build_cluster_boxes(sm_known)
+sm_boxes <- load_clusters("data/processed/habitats/saltmarsh_cluster_boxes.gpkg")
 cat(sprintf("  Saltmarsh clusters: %d\n", nrow(sm_boxes)))
 
 # 3a. Combined: known extent + indicator species + cluster boxes
@@ -379,7 +353,7 @@ save_plot(p_sm_ind_plot, "11_saltmarsh_indicators.png")
 # 3d. Cluster sub-plots (zoomed versions of combined)
 for (i in seq_len(nrow(sm_boxes))) {
   bb <- st_bbox(sm_boxes[i, ])
-  p_cl <- base_map(sprintf("Saltmarsh — %s", sm_boxes$name[i]), zoom = 12) +
+  p_cl <- base_map(sprintf("Saltmarsh — %s", sm_boxes$name[i]), zoom = 14) +
     geom_sf(data = sm_known, aes(fill = "Known extent"), colour = "#238443",
             alpha = 0.6) +
     {if (nrow(sm_ind) > 0)
@@ -401,7 +375,7 @@ cat("\n===== 4. NATIVE OYSTERS =====\n")
 oy_known <- st_read("data/processed/species/oyster_known_extent.gpkg", quiet = TRUE) %>%
   st_transform(27700)
 
-oy_hist_path <- "data/processed/species/oyster_historical_extent.gpkg"
+oy_hist_path <- "data/processed/species/oyster_historical_locations.gpkg"
 oy_hist <- if (file.exists(oy_hist_path)) {
   st_read(oy_hist_path, quiet = TRUE) %>% st_transform(27700)
 } else {
@@ -416,16 +390,7 @@ oy_indicators <- ind_all[which(ind_all$habitat == "Oyster"), ]
 oy_indicators <- oy_indicators[lengths(st_intersects(oy_indicators, smr)) > 0, ]
 cat(sprintf("  Oyster indicators (within SMR): %d\n", nrow(oy_indicators)))
 
-# Build oyster cluster boxes from known + historical
-oy_for_clusters <- bind_rows(
-  if (nrow(oy_known) > 0) oy_known else NULL,
-  if (nrow(oy_hist) > 0) oy_hist else NULL
-) %>% st_make_valid()
-oy_boxes <- if (nrow(oy_for_clusters) > 0) {
-  build_cluster_boxes(oy_for_clusters)
-} else {
-  st_sf(name = character(), geometry = st_sfc(crs = 27700))
-}
+oy_boxes <- load_clusters("data/processed/habitats/oyster_cluster_boxes.gpkg")
 cat(sprintf("  Oyster clusters: %d\n", nrow(oy_boxes)))
 
 # 4a. Combined
@@ -434,8 +399,8 @@ p_oy_combined <- base_map("Native Oysters",
   geom_sf(data = oy_potential, aes(fill = "Modelled potential"), colour = NA,
           alpha = 0.4) +
   {if (nrow(oy_hist) > 0)
-    geom_sf(data = oy_hist, aes(fill = "Historical"), colour = "#de2d26",
-            alpha = 0.4)} +
+    geom_sf(data = oy_hist, aes(colour = "Historical"), shape = 17,
+            size = 2, alpha = 0.6)} +
   geom_sf(data = oy_known, aes(fill = "Known extent"), colour = "#54278f",
           alpha = 0.7) +
   {if (nrow(oy_indicators) > 0)
@@ -460,7 +425,7 @@ save_plot(p_oy_known, "14_oyster_known.png")
 
 if (nrow(oy_hist) > 0) {
   p_oy_hist <- base_map("Native Oysters — Historical Extent") +
-    geom_sf(data = oy_hist, fill = "#fc9272", colour = "#de2d26", alpha = 0.5)
+    geom_sf(data = oy_hist, colour = "#de2d26", shape = 17, size = 2, alpha = 0.6)
   save_plot(p_oy_hist, "15_oyster_historical.png")
 }
 
@@ -480,12 +445,12 @@ save_plot(p_oy_ind, "17_oyster_indicators.png")
 # 4f. Cluster sub-plots (zoomed versions of combined)
 for (i in seq_len(nrow(oy_boxes))) {
   bb <- st_bbox(oy_boxes[i, ])
-  p_cl <- base_map(sprintf("Native Oysters — %s", oy_boxes$name[i]), zoom = 12) +
+  p_cl <- base_map(sprintf("Native Oysters — %s", oy_boxes$name[i]), zoom = 14) +
     geom_sf(data = oy_potential, aes(fill = "Modelled potential"), colour = NA,
             alpha = 0.4) +
     {if (nrow(oy_hist) > 0)
-      geom_sf(data = oy_hist, aes(fill = "Historical"), colour = "#de2d26",
-              alpha = 0.4)} +
+      geom_sf(data = oy_hist, aes(colour = "Historical"), shape = 17,
+              size = 2, alpha = 0.6)} +
     geom_sf(data = oy_known, aes(fill = "Known extent"), colour = "#54278f",
             alpha = 0.7) +
     {if (nrow(oy_indicators) > 0)
@@ -560,8 +525,7 @@ cat(sprintf("  Sand dune indicators: %d\n", nrow(dune_indicators)))
 # NOTE: Shoreline change transect data is computed in 03_habitats.R but not saved
 # to disk. To include it here, save transects_sf from 03_habitats.R first.
 
-# Build dune cluster boxes
-dune_boxes <- build_cluster_boxes(dune_known)
+dune_boxes <- load_clusters("data/processed/habitats/dune_cluster_boxes.gpkg")
 cat(sprintf("  Sand dune clusters: %d\n", nrow(dune_boxes)))
 
 # 5a. Combined: known + indicators + restoration potential + cluster boxes
@@ -603,7 +567,7 @@ save_plot(p_dune_restore, "23_sand_dunes_restoration.png")
 # 5e. Cluster sub-plots
 for (i in seq_len(nrow(dune_boxes))) {
   bb <- st_bbox(dune_boxes[i, ])
-  p_cl <- base_map(sprintf("Sand Dunes — %s", dune_boxes$name[i]), zoom = 12) +
+  p_cl <- base_map(sprintf("Sand Dunes — %s", dune_boxes$name[i]), zoom = 14) +
     geom_sf(data = dune_restore, aes(fill = factor(tier)), colour = NA, alpha = 0.4) +
     geom_sf(data = dune_known, fill = "#d9b38c", colour = "#8c6d46", alpha = 0.7) +
     {if (nrow(dune_indicators) > 0)
@@ -618,75 +582,482 @@ for (i in seq_len(nrow(dune_boxes))) {
 
 
 # ============================================================
+# 5b. COASTAL WOODLANDS
+# ============================================================
+cat("\n===== 5b. COASTAL WOODLANDS =====\n")
+
+hlcm_path <- "data/raw/habitats/General/HLCM-2022-L2_SCOTLAND_TIFF_27700/HLCM_2022_EUNIS_LEVEL2.tif"
+habmos_path <- "data/raw/habitats/General/Habitat_Map_of_Scotland_2181603415421412055.gpkg"
+
+if (!file.exists(hlcm_path)) {
+  cat("  WARNING: HLCM 2022 raster not found — skipping woodland plots\n")
+} else {
+
+  # --- Load HLCM and build lookup from raster category table ---
+  hlcm_raw <- rast(hlcm_path)
+  cat_tbl <- cats(hlcm_raw)[[1]]
+  lc_lookup <- data.frame(
+    lc_value   = cat_tbl$VALUE,
+    eunis_code = cat_tbl$EUNIS_CODE,
+    eunis_desc = cat_tbl$EUNIS_DESC,
+    stringsAsFactors = FALSE
+  )
+
+  aoi_buf <- st_buffer(scamp_aoi, dist = 10000)
+  hlcm_crop <- crop(hlcm_raw, ext(vect(aoi_buf)))
+  hlcm_int <- as.numeric(hlcm_crop)
+  NAflag(hlcm_int) <- -32768
+  cat(sprintf("  HLCM cropped: %d x %d cells\n", ncol(hlcm_int), nrow(hlcm_int)))
+
+  # --- Replicate HabMoS woodland reclassification from 05_localthreats.R ---
+  g1_val  <- lc_lookup$lc_value[lc_lookup$eunis_code == "G1"]
+  g3f_val <- lc_lookup$lc_value[lc_lookup$eunis_code == "G3.F"]
+
+  habmos_wood <- NULL
+  if (file.exists(habmos_path)) {
+    habmos_all <- st_read(habmos_path, layer = st_layers(habmos_path)$name[1],
+                          wkt_filter = st_as_text(st_as_sfc(st_bbox(aoi_buf))),
+                          quiet = TRUE) %>% st_make_valid()
+
+    habmos_g3f2 <- habmos_all[which(habmos_all$HABITAT_CODE == "G3.F2"), ]
+    if (nrow(habmos_g3f2) > 0) {
+      ex <- terra::extract(hlcm_int, vect(habmos_g3f2), cells = TRUE)
+      hits <- ex$cell[ex[[2]] == g1_val]
+      if (length(hits) > 0) hlcm_int[hits] <- g3f_val
+      cat(sprintf("  G3.F2 → G3.F reclassified: %d pixels\n", length(hits)))
+    }
+
+    habmos_g4f <- habmos_all[which(habmos_all$HABITAT_CODE == "G4.F"), ]
+    if (nrow(habmos_g4f) > 0) {
+      ex <- terra::extract(hlcm_int, vect(habmos_g4f), cells = TRUE)
+      hits <- ex$cell[ex[[2]] == g1_val]
+      if (length(hits) > 0) hlcm_int[hits] <- 33
+      cat(sprintf("  G4.F reclassified: %d pixels\n", length(hits)))
+    }
+
+    habmos_wood <- habmos_all[grepl("^G", habmos_all$HABITAT_CODE), ]
+    cat(sprintf("  HabMoS woodland polygons: %d\n", nrow(habmos_wood)))
+  } else {
+    cat("  WARNING: HabMoS not found — using raw HLCM without reclassification\n")
+  }
+
+  # --- Define woodland classes and colours ---
+  wood_classes <- data.frame(
+    eunis_code = c("G1", "G3.F", "G4", "G5", "E5", "G4.F"),
+    label = c("Broadleaved woodland", "Conifer plantation",
+              "Mixed woodland", "Felled / early-stage",
+              "Woodland fringes", "Mixed forestry plantation"),
+    colour = c("#1b7837", "#7570b3", "#66c2a5", "#a6761d", "#b3de69", "#fc8d62"),
+    stringsAsFactors = FALSE
+  )
+
+  wood_classes$lc_value <- sapply(wood_classes$eunis_code, function(code) {
+    if (code == "G4.F") return(33L)
+    v <- lc_lookup$lc_value[lc_lookup$eunis_code == code]
+    if (length(v) == 0) return(NA_integer_)
+    v
+  })
+  wood_classes <- wood_classes[!is.na(wood_classes$lc_value), ]
+
+  rcl <- cbind(from = wood_classes$lc_value, to = seq_len(nrow(wood_classes)))
+  hlcm_wood <- terra::classify(hlcm_int, rcl, others = NA)
+  levels(hlcm_wood) <- data.frame(value = seq_len(nrow(wood_classes)),
+                                   label = wood_classes$label)
+  wood_pal <- setNames(wood_classes$colour, wood_classes$label)
+
+  cat(sprintf("  Woodland classes present: %s\n",
+              paste(wood_classes$label, collapse = ", ")))
+
+  # --- Woodland indicator records ---
+  wood_indicators <- st_sf(geometry = st_sfc(crs = 27700))
+  if (file.exists("outputs/species/indicator_records.gpkg")) {
+    all_ind <- st_read("outputs/species/indicator_records.gpkg", quiet = TRUE) %>%
+      st_transform(27700)
+    wood_indicators <- all_ind[all_ind$habitat == "Woodland", ]
+    wood_indicators <- wood_indicators[lengths(st_intersects(wood_indicators, aoi_buf)) > 0, ]
+    cat(sprintf("  Woodland indicator records: %d\n", nrow(wood_indicators)))
+  }
+
+  # --- 5b-1. HLCM reclassified woodland map ---
+  cat("  Plotting HLCM woodland...\n")
+  p_wood_hlcm <- base_map("Coastal Woodlands",
+                           "HLCM 2022 reclassified with HabMoS corrections") +
+    geom_spatraster(data = hlcm_wood, alpha = 0.85) +
+    scale_fill_manual(values = wood_pal, name = "Woodland type",
+                      na.translate = FALSE) +
+    {if (nrow(wood_indicators) > 0)
+      geom_sf(data = wood_indicators, aes(shape = "Woodland indicators"),
+              colour = "#d62728", size = 1.5, alpha = 0.7)} +
+    {if (nrow(wood_indicators) > 0)
+      scale_shape_manual(values = c("Woodland indicators" = 17), name = NULL)}
+  save_plot(p_wood_hlcm, "24a_woodland_hlcm.png")
+
+  # --- 5b-2. HabMoS woodland map (comparison) ---
+  if (!is.null(habmos_wood) && nrow(habmos_wood) > 0) {
+    cat("  Plotting HabMoS woodland...\n")
+
+    habmos_wood$wood_type <- case_when(
+      grepl("^G1", habmos_wood$HABITAT_CODE) ~ "Native broadleaved",
+      habmos_wood$HABITAT_CODE == "G3.F"     ~ "Conifer plantation",
+      habmos_wood$HABITAT_CODE == "G3.F2"    ~ "Exotic conifer plantation",
+      grepl("^G3", habmos_wood$HABITAT_CODE) ~ "Other coniferous",
+      habmos_wood$HABITAT_CODE == "G4.F"     ~ "Mixed forestry plantation",
+      grepl("^G4", habmos_wood$HABITAT_CODE) ~ "Mixed woodland",
+      habmos_wood$HABITAT_CODE == "G5"       ~ "Felled / early-stage",
+      TRUE                                   ~ habmos_wood$HABITAT_CODE
+    )
+
+    habmos_pal <- c(
+      "Native broadleaved"        = "#1b7837",
+      "Conifer plantation"        = "#7570b3",
+      "Exotic conifer plantation" = "#e7298a",
+      "Other coniferous"          = "#a6cee3",
+      "Mixed woodland"            = "#66c2a5",
+      "Mixed forestry plantation" = "#fc8d62",
+      "Felled / early-stage"      = "#a6761d"
+    )
+    habmos_pal <- habmos_pal[names(habmos_pal) %in% unique(habmos_wood$wood_type)]
+
+    p_wood_habmos <- base_map("Coastal Woodlands",
+                               "Habitat Map of Scotland (HabMoS)") +
+      geom_sf(data = habmos_wood, aes(fill = wood_type), colour = NA, alpha = 0.7) +
+      scale_fill_manual(values = habmos_pal, name = "Woodland type")
+    save_plot(p_wood_habmos, "24b_woodland_habmos.png")
+  }
+}
+
+
+# ============================================================
 # 6. SPECIES
 # ============================================================
 cat("\n===== 6. SPECIES =====\n")
 
-# 6a. Marine species richness
+# --- Helper: downscale 5 km grid → 500 m raster, masked to coastline ---
+# Nearest-neighbour preserves original values; mask clips to boundary.
+downscale_grid <- function(grid_sf, field, mask_sf, exclude_sf = NULL, fact = 10) {
+  v <- vect(grid_sf)
+  template <- rast(ext(v), resolution = 5000, crs = crs(v))
+  r <- rasterize(v, template, field = field)
+  r_fine <- disagg(r, fact = fact, method = "near")
+  r_out <- mask(r_fine, vect(mask_sf))
+  if (!is.null(exclude_sf)) r_out <- mask(r_out, vect(exclude_sf), inverse = TRUE)
+  r_out
+}
+
+# --- Load species grids ---
 rich_marine <- st_read("outputs/species/richness_grid_marine.gpkg", quiet = TRUE) %>%
   st_transform(27700)
-
-p_rich_marine <- base_map("Marine Species Richness", "5 km grid") +
-  geom_sf(data = rich_marine, aes(fill = species_richness), colour = NA, alpha = 0.7) +
-  scale_fill_viridis_c(option = "mako", direction = -1, name = "Richness",
-                       na.value = NA)
-save_plot(p_rich_marine, "25_marine_richness.png")
-
-# 6b. Terrestrial species richness
 rich_terr <- st_read("outputs/species/richness_grid_terrestrial.gpkg", quiet = TRUE) %>%
   st_transform(27700)
+cat(sprintf("  Marine grid: %d cells\n", nrow(rich_marine)))
+cat(sprintf("  Terrestrial grid: %d cells\n", nrow(rich_terr)))
 
-p_rich_terr <- base_map("Terrestrial Species Richness", "5 km grid") +
-  geom_sf(data = rich_terr, aes(fill = species_richness), colour = NA, alpha = 0.7) +
-  scale_fill_viridis_c(option = "viridis", direction = -1, name = "Richness",
-                       na.value = NA)
-save_plot(p_rich_terr, "26_terrestrial_richness.png")
+# --- 6a–f. Paired marine/terrestrial metric maps (downscaled + coastline-masked) ---
+metric_specs <- list(
+  list(col = "species_richness", title = "Species Richness",
+       opt = "mako", dir = -1, lab = "Richness", num = "25"),
+  list(col = "record_count", title = "Recording Effort",
+       opt = "inferno", dir = -1, lab = "Records", num = "26"),
+  list(col = "median_year", title = "Median Recording Year",
+       opt = NULL, dir = 1, lab = "Median year", num = "27",
+       diverging = TRUE, mid = 2010),
+  list(col = "most_recent_year", title = "Most Recent Record",
+       opt = "plasma", dir = 1, lab = "Year", num = "28"),
+  list(col = "beta_diversity", title = "Beta Diversity",
+       opt = "turbo", dir = -1, lab = "Beta\ndiversity", num = "29"),
+  list(col = "community_similarity", title = "Community Similarity",
+       opt = "cividis", dir = -1, lab = "Similarity", num = "30")
+)
 
-# 6c. INNS distribution — cropped to SCAMP AOI
+for (spec in metric_specs) {
+  for (realm in c("marine", "terrestrial")) {
+    grid_sf <- if (realm == "marine") rich_marine else rich_terr
+    if (!spec$col %in% names(grid_sf)) {
+      cat(sprintf("  SKIP: %s not in %s grid\n", spec$col, realm))
+      next
+    }
+
+    mask_sf <- if (realm == "marine") smr else dg
+    excl_sf <- if (realm == "marine") NULL else smr
+    r <- downscale_grid(grid_sf, spec$col, mask_sf, exclude_sf = excl_sf)
+
+    rlabel <- if (realm == "marine") "Marine" else "Terrestrial"
+    p <- base_map(sprintf("%s %s", rlabel, spec$title),
+                  "5 km grid, nearest-neighbour to 500 m, coastline-masked") +
+      geom_spatraster(data = r)
+
+    if (!is.null(spec$diverging) && spec$diverging) {
+      p <- p + scale_fill_gradient2(
+        low = "#2166ac", mid = "white", high = "#b2182b",
+        midpoint = spec$mid, name = spec$lab, na.value = NA)
+    } else {
+      p <- p + scale_fill_viridis_c(option = spec$opt, direction = spec$dir,
+                                     name = spec$lab, na.value = NA)
+    }
+
+    suffix <- if (realm == "marine") "a" else "b"
+    slug <- gsub(" ", "_", tolower(spec$title))
+    save_plot(p, sprintf("%s%s_%s_%s.png", spec$num, suffix, slug, realm))
+  }
+}
+
+# --- Load INNS records ---
 inns <- st_read("outputs/species/inns_records.gpkg", quiet = TRUE) %>%
   st_transform(27700)
 inns <- inns[lengths(st_intersects(inns, scamp_aoi)) > 0, ]
 cat(sprintf("  INNS records in AOI: %d\n", nrow(inns)))
 
-p_inns <- base_map("Invasive Non-Native Species", "Records within SCAMP AOI") +
-  geom_sf(data = inns, aes(colour = realm), size = 0.8, alpha = 0.5) +
-  scale_colour_manual(values = c(Marine = "#2166ac", Terrestrial = "#b2182b",
-                                  Freshwater = "#1b7837"),
-                      name = "Realm")
-save_plot(p_inns, "27_inns_distribution.png")
+# --- Build 5 km grid for INNS analysis ---
+grid_5km <- st_make_grid(scamp_aoi, cellsize = 5000, square = TRUE) %>%
+  st_sf(cell_id = seq_along(.), geometry = .)
+grid_5km <- grid_5km[lengths(st_intersects(grid_5km, scamp_aoi)) > 0, ]
 
-# 6d. PMF records
+inns_gridded <- st_join(inns, grid_5km, join = st_within) %>%
+  st_drop_geometry() %>%
+  filter(!is.na(cell_id))
+cat(sprintf("  INNS records gridded: %d\n", nrow(inns_gridded)))
+
+# --- 6g. INNS detections per grid cell ---
+if (nrow(inns_gridded) > 0) {
+  det_counts <- inns_gridded %>%
+    group_by(cell_id) %>%
+    summarise(n_detections = n(), .groups = "drop")
+  det_grid <- grid_5km %>%
+    left_join(det_counts, by = "cell_id") %>%
+    filter(!is.na(n_detections))
+  r_det <- downscale_grid(det_grid, "n_detections", scamp_aoi)
+
+  p_det <- base_map("INNS Detections per Grid Cell",
+                     "Total INNS records per 5 km cell, downscaled to 500 m") +
+    geom_spatraster(data = r_det) +
+    scale_fill_viridis_c(option = "rocket", direction = -1,
+                         name = "Detections", na.value = NA)
+  save_plot(p_det, "31_inns_detections_grid.png")
+}
+
+# --- 6h. Year of first INNS detection per grid cell ---
+if (nrow(inns_gridded) > 0 && "year" %in% names(inns_gridded)) {
+  first_det <- inns_gridded %>%
+    filter(!is.na(year)) %>%
+    group_by(cell_id) %>%
+    summarise(first_year = min(year), .groups = "drop")
+  first_grid <- grid_5km %>%
+    left_join(first_det, by = "cell_id") %>%
+    filter(!is.na(first_year))
+  r_first <- downscale_grid(first_grid, "first_year", scamp_aoi)
+
+  p_first <- base_map("Year of First INNS Detection",
+                       "Earliest INNS record per 5 km cell, downscaled to 500 m") +
+    geom_spatraster(data = r_first) +
+    scale_fill_viridis_c(option = "plasma", direction = 1,
+                         name = "First\ndetection\nyear", na.value = NA)
+  save_plot(p_first, "32_inns_first_detection.png")
+}
+
+# --- 6i. Cumulative INNS spread — small multiples ---
+if (nrow(inns_gridded) > 0 && "year" %in% names(inns_gridded)) {
+  time_bands <- list(
+    "Pre-2000"          = c(-Inf, 1999),
+    "2000–2009"    = c(2000, 2009),
+    "2010–2019"    = c(2010, 2019),
+    "2020–present" = c(2020, Inf)
+  )
+
+  first_by_cell <- inns_gridded %>%
+    filter(!is.na(year)) %>%
+    group_by(cell_id) %>%
+    summarise(first_year = min(year), .groups = "drop")
+
+  cum_cells  <- integer(length(time_bands))
+  cum_spp    <- integer(length(time_bands))
+  band_panels <- list()
+
+  for (b in seq_along(time_bands)) {
+    band_range <- time_bands[[b]]
+    cumulative_ids <- first_by_cell %>%
+      filter(first_year <= band_range[2]) %>% pull(cell_id)
+    new_ids <- first_by_cell %>%
+      filter(first_year >= band_range[1], first_year <= band_range[2]) %>%
+      pull(cell_id)
+
+    cum_cells[b] <- length(cumulative_ids)
+    cum_spp[b] <- inns_gridded %>%
+      filter(!is.na(year), year <= band_range[2]) %>%
+      summarise(n = n_distinct(latin_name)) %>% pull(n)
+
+    band_grid <- grid_5km %>%
+      filter(cell_id %in% cumulative_ids) %>%
+      mutate(status = if_else(cell_id %in% new_ids,
+                              "Newly occupied", "Previously occupied"))
+
+    p_b <- ggplot() +
+      annotation_map_tile(type = "osm", zoom = 9, progress = "none", quiet = TRUE) +
+      geom_sf(data = scamp_aoi, fill = NA, colour = "black", linewidth = 0.4,
+              linetype = "dashed")
+    prev_cells <- band_grid %>% filter(status == "Previously occupied")
+    new_cells  <- band_grid %>% filter(status == "Newly occupied")
+    if (nrow(prev_cells) > 0)
+      p_b <- p_b + geom_sf(data = prev_cells, fill = "grey60", colour = NA)
+    if (nrow(new_cells) > 0)
+      p_b <- p_b + geom_sf(data = new_cells, fill = "#d7191c", colour = NA)
+    p_b <- p_b +
+      coord_sf(crs = 27700) +
+      labs(title = names(time_bands)[b],
+           subtitle = sprintf("%d cells, %d species (cumulative)",
+                              length(cumulative_ids), cum_spp[b])) +
+      theme_scamp(base_size = 8) +
+      theme(legend.position = "none")
+    band_panels[[b]] <- p_b
+  }
+
+  p_inset <- ggplot(data.frame(band = seq_along(time_bands),
+                                label = names(time_bands),
+                                cells = cum_cells),
+                    aes(x = band, y = cells)) +
+    geom_line(colour = "#d7191c", linewidth = 0.8) +
+    geom_point(colour = "#d7191c", size = 2) +
+    scale_x_continuous(breaks = seq_along(time_bands), labels = names(time_bands)) +
+    labs(x = NULL, y = "Cells") +
+    theme_minimal(base_size = 7) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1),
+          panel.grid.minor = element_blank(),
+          plot.background = element_rect(fill = "white", colour = "grey60",
+                                         linewidth = 0.3))
+
+  band_panels[[length(time_bands)]] <- band_panels[[length(time_bands)]] +
+    inset_element(p_inset, left = 0.55, bottom = 0.02, right = 0.98, top = 0.38)
+
+  p_spread <- wrap_plots(band_panels, ncol = 2) +
+    plot_annotation(
+      title = "Cumulative INNS Spread across SCAMP AOI",
+      subtitle = "Grey = previously occupied, red = newly occupied in this time band",
+      theme = theme(plot.title = element_text(size = 14, face = "bold"),
+                    plot.subtitle = element_text(size = 10, colour = "grey30")))
+  save_plot(p_spread, "33_inns_cumulative_spread.png", width = 14, height = 12)
+}
+
+# --- 6j. Habitat-builder per-species maps ---
+cat("  Habitat-builder maps...\n")
+ind_val_path <- "outputs/species/indicator_species_validated.csv"
+ind_rec_path <- "outputs/species/indicator_records.gpkg"
+
+if (file.exists(ind_val_path) && file.exists(ind_rec_path)) {
+  ind_validated <- read.csv(ind_val_path, stringsAsFactors = FALSE)
+  all_ind <- st_read(ind_rec_path, quiet = TRUE) %>% st_transform(27700)
+
+  if ("functional_group" %in% names(ind_validated)) {
+    builders <- ind_validated[ind_validated$functional_group == "habitat_builder", ]
+    n_built <- 0L
+
+    for (bi in seq_len(nrow(builders))) {
+      sp_latin  <- builders$latin_name[bi]
+      sp_common <- builders$common_name[bi]
+      sp_data   <- all_ind[all_ind$latin_name == sp_latin, ]
+      if (nrow(sp_data) == 0) next
+
+      sp_label <- if (!is.na(sp_common) && sp_common != "") sp_common else sp_latin
+
+      p_sp <- base_map(sp_label, sp_latin)
+      if ("year" %in% names(sp_data)) {
+        p_sp <- p_sp +
+          geom_sf(data = sp_data, aes(colour = year), size = 2, alpha = 0.8) +
+          scale_colour_viridis_c(option = "plasma", direction = 1, name = "Year")
+      } else {
+        p_sp <- p_sp +
+          geom_sf(data = sp_data, colour = "#d62728", size = 2, alpha = 0.8)
+      }
+
+      fname_clean <- gsub("[^a-zA-Z0-9]", "_", tolower(sp_label))
+      save_plot(p_sp, sprintf("34_%s.png", fname_clean))
+      n_built <- n_built + 1L
+    }
+    cat(sprintf("  %d habitat-builder species mapped\n", n_built))
+  } else {
+    cat("  WARNING: functional_group column not found in validated CSV\n")
+  }
+} else {
+  cat("  WARNING: indicator data not found — skipping habitat-builder maps\n")
+}
+
+# --- 6k. PMF records ---
 pmf_pts_path  <- "data/processed/species/pmf_points_scamp.gpkg"
 pmf_poly_path <- "data/processed/species/pmf_polygons_scamp.gpkg"
-
 pmf_pts   <- NULL
 pmf_polys <- NULL
 
 p_pmf <- base_map("Priority Marine Features", "GeMS records")
-
 if (file.exists(pmf_poly_path)) {
   pmf_polys <- st_read(pmf_poly_path, quiet = TRUE) %>% st_transform(27700)
-  cat(sprintf("  PMF polygons loaded: %d features\n", nrow(pmf_polys)))
-  if (nrow(pmf_polys) > 0) {
+  if (nrow(pmf_polys) > 0)
     p_pmf <- p_pmf +
       geom_sf(data = pmf_polys, fill = "#df65b0", colour = "#ce1256", alpha = 0.3)
-  }
 } else {
-  cat("  WARNING: pmf_polygons_scamp.gpkg not found — run 02_themeD_species.R first\n")
+  cat("  WARNING: pmf_polygons_scamp.gpkg not found\n")
 }
-
 if (file.exists(pmf_pts_path)) {
   pmf_pts <- st_read(pmf_pts_path, quiet = TRUE) %>% st_transform(27700)
-  cat(sprintf("  PMF points loaded: %d features\n", nrow(pmf_pts)))
-  if (nrow(pmf_pts) > 0) {
+  if (nrow(pmf_pts) > 0)
     p_pmf <- p_pmf +
       geom_sf(data = pmf_pts, colour = "#ce1256", size = 0.8, alpha = 0.5)
-  }
 } else {
-  cat("  WARNING: pmf_points_scamp.gpkg not found — run 02_themeD_species.R first\n")
+  cat("  WARNING: pmf_points_scamp.gpkg not found\n")
 }
+save_plot(p_pmf, "35_pmf_records.png")
 
-save_plot(p_pmf, "28_pmf_records.png")
+# --- 6l. INNS interactive leaflet (per-species, toggleable) ---
+if (nrow(inns) > 0 && "latin_name" %in% names(inns)) {
+  cat("  Building INNS interactive leaflet...\n")
+  inns_wgs <- st_transform(inns, 4326)
+  species_list <- sort(unique(inns_wgs$latin_name))
+  sp_colours <- setNames(
+    hcl.colors(length(species_list), palette = "Dynamic"),
+    species_list)
+
+  m_inns <- leaflet() %>%
+    addProviderTiles(providers$CartoDB.Positron, group = "CartoDB") %>%
+    addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+    addProviderTiles(providers$OpenStreetMap, group = "OSM") %>%
+    addPolygons(data = st_transform(scamp_aoi, 4326), fill = FALSE,
+                color = "black", weight = 2, dashArray = "5,5", group = "AOI")
+
+  sp_group_labels <- character(length(species_list))
+  for (si in seq_along(species_list)) {
+    sp <- species_list[si]
+    sp_data <- inns_wgs[inns_wgs$latin_name == sp, ]
+
+    sp_label <- sp
+    if ("common_name" %in% names(sp_data)) {
+      cn <- unique(na.omit(sp_data$common_name))
+      if (length(cn) > 0 && cn[1] != "")
+        sp_label <- sprintf("%s (%s)", cn[1], sp)
+    }
+    sp_group_labels[si] <- sp_label
+
+    popup_text <- sprintf("<b>%s</b>", sp_label)
+    if ("year" %in% names(sp_data))
+      popup_text <- paste0(popup_text, "<br>Year: ", sp_data$year)
+    if ("realm" %in% names(sp_data))
+      popup_text <- paste0(popup_text, "<br>Realm: ", sp_data$realm)
+
+    m_inns <- m_inns %>%
+      addCircleMarkers(data = sp_data, radius = 3,
+                       color = sp_colours[sp], fillOpacity = 0.7, stroke = FALSE,
+                       group = sp_label, popup = popup_text)
+  }
+
+  all_groups <- c("AOI", sp_group_labels)
+  m_inns <- m_inns %>%
+    addLayersControl(
+      baseGroups = c("CartoDB", "Satellite", "OSM"),
+      overlayGroups = all_groups,
+      options = layersControlOptions(collapsed = TRUE))
+
+  for (grp in sp_group_labels) m_inns <- m_inns %>% hideGroup(grp)
+
+  inns_leaflet_path <- file.path(out_dir, "inns_interactive.html")
+  saveWidget(m_inns, inns_leaflet_path, selfcontained = TRUE)
+  cat(sprintf("  Saved: %s\n", inns_leaflet_path))
+}
 
 
 # ============================================================
@@ -750,7 +1121,7 @@ if (length(fish_panels) > 0) {
   p_fishing <- wrap_plots(fish_panels, ncol = length(fish_panels)) +
     plot_annotation(title = "Fishing Pressure",
                     theme = theme(plot.title = element_text(face = "bold", size = 14)))
-  save_plot(p_fishing, "29_fishing_pressure.png",
+  save_plot(p_fishing, "36_fishing_pressure.png",
             width = 7 * length(fish_panels), height = 8)
 }
 
@@ -777,7 +1148,7 @@ if (file.exists(rivers_path)) {
       geom_sf(data = pp, colour = "red", size = 2.5, shape = 17)
   }
   poll_panels <- c(poll_panels, list(p_rivers))
-  save_plot(p_rivers, "31_river_accumulated_risk.png")
+  save_plot(p_rivers, "37_river_accumulated_risk.png")
 }
 
 if (file.exists(exposure_path)) {
@@ -798,14 +1169,14 @@ if (file.exists(exposure_path)) {
     labs(title = "Marine Pollution Exposure (BFS decay)") +
     theme_scamp()
   poll_panels <- c(poll_panels, list(p_exposure))
-  save_plot(p_exposure, "32_marine_pollution_exposure.png")
+  save_plot(p_exposure, "38_marine_pollution_exposure.png")
 }
 
 if (length(poll_panels) > 0) {
   p_pollution <- wrap_plots(poll_panels, ncol = length(poll_panels)) +
     plot_annotation(title = "Diffuse Pollution",
                     theme = theme(plot.title = element_text(face = "bold", size = 14)))
-  save_plot(p_pollution, "30_diffuse_pollution_combined.png",
+  save_plot(p_pollution, "39_diffuse_pollution_combined.png",
             width = 7 * length(poll_panels), height = 8)
 }
 
@@ -869,7 +1240,7 @@ if (file.exists(cum_path)) {
       scale_shape_manual(values = threat_shape_map, name = "Vector threat") +
       guides(shape = guide_legend(override.aes = list(size = 3)))
   }
-  save_plot(p_cum, "33_cumulative_pressure_combined.png")
+  save_plot(p_cum, "40_cumulative_pressure_combined.png")
 
   # Cumulative only
   p_cum_only <- ggplot() +
@@ -887,7 +1258,7 @@ if (file.exists(cum_path)) {
     coord_sf(crs = 27700) +
     labs(title = "Cumulative Pressure Surface") +
     theme_scamp()
-  save_plot(p_cum_only, "34_cumulative_pressure.png")
+  save_plot(p_cum_only, "41_cumulative_pressure.png")
 }
 
 # Vector threats standalone
@@ -904,7 +1275,7 @@ if (!is.null(vec_threats) && nrow(vec_threats) > 0) {
       scale_shape_manual(values = threat_shape_map, name = "Threat (point)") +
       guides(shape = guide_legend(override.aes = list(size = 3)))
   }
-  save_plot(p_vec, "35_vector_threats.png")
+  save_plot(p_vec, "42_vector_threats.png")
 }
 
 
@@ -979,8 +1350,9 @@ m <- m %>%
               color = "#bcbddc", weight = 1, group = "Oyster: Potential")
 if (nrow(oy_hist) > 0) {
   m <- m %>%
-    addPolygons(data = to_wgs(oy_hist), fillColor = "#fc9272", fillOpacity = 0.3,
-                color = "#de2d26", weight = 1, group = "Oyster: Historical")
+    addCircleMarkers(data = to_wgs(oy_hist), radius = 4,
+                     color = "#de2d26", fillColor = "#fc9272", fillOpacity = 0.6,
+                     stroke = TRUE, weight = 1, group = "Oyster: Historical")
 }
 if (nrow(oy_indicators) > 0) {
   m <- m %>%
@@ -1046,32 +1418,104 @@ if (!is.null(pmf_polys) && nrow(pmf_polys) > 0) {
                 color = "#ce1256", weight = 1, group = "Species: PMF")
 }
 
-# --- Threats ---
-if (exists("rivers_risk")) {
-  pal_risk <- colorNumeric("plasma", rivers_risk[[risk_col]])
+# --- INNS detection grid ---
+if (exists("det_grid") && nrow(det_grid) > 0) {
+  pal_det <- colorNumeric("YlOrRd", det_grid$n_detections)
   m <- m %>%
-    addPolylines(data = to_wgs(rivers_risk),
-                 color = ~pal_risk(rivers_risk[[risk_col]]),
-                 weight = 2, opacity = 0.7, group = "Threats: River risk",
-                 popup = ~paste0("Risk: ", round(.data[[risk_col]], 2)))
+    addPolygons(data = to_wgs(det_grid),
+                fillColor = ~pal_det(n_detections),
+                fillOpacity = 0.5, color = NA, weight = 0,
+                group = "Species: INNS detections",
+                popup = ~paste0("Detections: ", n_detections))
 }
 
+# --- INNS first detection year ---
+if (exists("first_grid") && nrow(first_grid) > 0) {
+  pal_first <- colorNumeric("plasma", first_grid$first_year)
+  m <- m %>%
+    addPolygons(data = to_wgs(first_grid),
+                fillColor = ~pal_first(first_year),
+                fillOpacity = 0.5, color = NA, weight = 0,
+                group = "Species: INNS first detection",
+                popup = ~paste0("First detection: ", first_year))
+}
+
+# --- Habitat-builder indicator records ---
+if (exists("all_ind") && exists("builders") && nrow(all_ind) > 0) {
+  builder_recs <- all_ind[all_ind$latin_name %in% builders$latin_name, ]
+  if (nrow(builder_recs) > 0) {
+    builder_recs$popup_text <- paste0("<b>", builder_recs$latin_name, "</b>")
+    if ("common_name" %in% names(builder_recs))
+      builder_recs$popup_text <- paste0(builder_recs$popup_text,
+                                         "<br>", builder_recs$common_name)
+    if ("year" %in% names(builder_recs))
+      builder_recs$popup_text <- paste0(builder_recs$popup_text,
+                                         "<br>Year: ", builder_recs$year)
+    m <- m %>%
+      addCircleMarkers(data = to_wgs(builder_recs), radius = 3,
+                       color = "#d62728", fillOpacity = 0.6, stroke = FALSE,
+                       group = "Species: Habitat builders",
+                       popup = ~popup_text)
+  }
+}
+
+# --- Woodland (HabMoS) ---
+if (exists("habmos_wood") && !is.null(habmos_wood) && nrow(habmos_wood) > 0) {
+  habmos_wood_wgs <- to_wgs(habmos_wood)
+  habmos_wood_wgs$popup_text <- habmos_wood_wgs$HABITAT_CODE
+  if ("wood_type" %in% names(habmos_wood_wgs))
+    habmos_wood_wgs$popup_text <- habmos_wood_wgs$wood_type
+  habmos_wood_pal <- c(
+    "Native broadleaved" = "#1b7837", "Conifer plantation" = "#7570b3",
+    "Exotic conifer plantation" = "#e7298a", "Other coniferous" = "#a6cee3",
+    "Mixed woodland" = "#66c2a5", "Mixed forestry plantation" = "#fc8d62",
+    "Felled / early-stage" = "#a6761d")
+  wood_col_var <- if ("wood_type" %in% names(habmos_wood_wgs)) "wood_type" else "HABITAT_CODE"
+  pal_wood <- colorFactor(
+    palette = unname(habmos_wood_pal),
+    domain = unique(habmos_wood_wgs[[wood_col_var]]))
+  habmos_wood_wgs$fill_colour <- pal_wood(habmos_wood_wgs[[wood_col_var]])
+  m <- m %>%
+    addPolygons(data = habmos_wood_wgs,
+                fillColor = ~fill_colour,
+                fillOpacity = 0.4, color = NA, weight = 0,
+                group = "Woodland: HabMoS",
+                popup = ~popup_text)
+}
+
+# --- Threats ---
+
+# River risk (pre-compute popup to avoid .data issues in leaflet formulas)
+if (exists("rivers_risk") && nrow(rivers_risk) > 0) {
+  rivers_wgs <- to_wgs(rivers_risk)
+  rivers_wgs$risk_value <- rivers_wgs[[risk_col]]
+  rivers_wgs$popup_text <- paste0("Risk: ", round(rivers_wgs$risk_value, 2))
+  pal_risk <- colorNumeric("plasma", rivers_wgs$risk_value)
+  m <- m %>%
+    addPolylines(data = rivers_wgs, color = ~pal_risk(risk_value),
+                 weight = 2, opacity = 0.7, group = "Threats: River risk",
+                 popup = ~popup_text)
+}
+
+# Pour points (pre-compute popup)
+if (!exists("pp_path")) pp_path <- "outputs/catchments/coastal_pour_points.gpkg"
 if (file.exists(pp_path)) {
   pp_wgs <- st_read(pp_path, quiet = TRUE) %>% st_transform(4326)
+  pp_wgs$popup_text <- "Pour point"
+  if ("watercourse_name" %in% names(pp_wgs))
+    pp_wgs$popup_text <- pp_wgs$watercourse_name
   pp_risk_col <- if ("accum_risk_raw" %in% names(pp_wgs)) "accum_risk_raw" else
     if ("accum_risk" %in% names(pp_wgs)) "accum_risk" else NULL
+  if (!is.null(pp_risk_col))
+    pp_wgs$popup_text <- paste0(pp_wgs$popup_text,
+                                 "<br>Risk: ", round(pp_wgs[[pp_risk_col]], 2))
   m <- m %>%
     addCircleMarkers(data = pp_wgs, radius = 4,
                      color = "red", fillColor = "red", fillOpacity = 0.7,
-                     group = "Threats: Pour points",
-                     popup = ~paste0(
-                       if ("watercourse_name" %in% names(pp_wgs)) watercourse_name
-                       else "Pour point",
-                       if (!is.null(pp_risk_col))
-                         paste0("<br>Risk: ", round(.data[[pp_risk_col]], 2))
-                       else ""))
+                     group = "Threats: Pour points", popup = ~popup_text)
 }
 
+# Vector threats
 if (!is.null(vec_pts) && nrow(vec_pts) > 0) {
   m <- m %>%
     addCircleMarkers(data = to_wgs(vec_pts), radius = 3,
@@ -1086,6 +1530,131 @@ if (!is.null(vec_polys) && nrow(vec_polys) > 0) {
                 popup = ~paste0("<b>", threat_type, "</b>"))
 }
 
+# Raster threats (aggregate for performance, project to WGS84)
+raster_threat_specs <- list(
+  list(var = "fish_gfw",   name = "Threats: Fishing GFW",          pal = "inferno"),
+  list(var = "fish_u12",   name = "Threats: Fishing under-12m",    pal = "YlOrRd"),
+  list(var = "marine_exp", name = "Threats: Marine exposure",      pal = "magma"),
+  list(var = "cum_press",  name = "Threats: Cumulative pressure",  pal = "turbo")
+)
+for (rt in raster_threat_specs) {
+  if (exists(rt$var, inherits = FALSE)) {
+    r_obj <- get(rt$var)
+    r_agg <- terra::aggregate(r_obj, fact = 4, fun = "mean", na.rm = TRUE)
+    r_wgs <- terra::project(r_agg, "EPSG:4326")
+    vals <- terra::values(r_wgs)[!is.na(terra::values(r_wgs))]
+    if (length(vals) > 0) {
+      pal_r <- colorNumeric(rt$pal, range(vals), na.color = "transparent")
+      m <- m %>%
+        addRasterImage(raster::raster(r_wgs), colors = pal_r, opacity = 0.7,
+                       group = rt$name)
+      cat(sprintf("  Leaflet raster added: %s\n", rt$name))
+    }
+  }
+}
+
+# --- Legends ---
+
+# Habitats — fixed-colour layers
+m <- m %>%
+  addLegend(position = "bottomright", group = "Seagrass: Known",
+            colors = c("#1b7837", "#a6d854", "#4d004b"),
+            labels = c("Known extent", "Modelled potential", "Indicator records"),
+            title = "Seagrass", opacity = 0.8) %>%
+  addLegend(position = "bottomright", group = "Saltmarsh: Known",
+            colors = c("#78c679", "#004529"),
+            labels = c("Known extent", "Indicator records"),
+            title = "Saltmarsh", opacity = 0.8) %>%
+  addLegend(position = "bottomright", group = "Oyster: Known",
+            colors = c("#756bb1", "#bcbddc", "#de2d26", "#e6550d"),
+            labels = c("Known extent", "Modelled potential", "Historical", "Indicator records"),
+            title = "Oyster", opacity = 0.8) %>%
+  addLegend(position = "bottomright", group = "Sand Dunes: Known",
+            colors = c("#d9b38c", "#fdae61", "#7a0177"),
+            labels = c("Known extent", "Restoration potential", "Indicator records"),
+            title = "Sand Dunes", opacity = 0.8)
+
+# Species — continuous palettes
+m <- m %>%
+  addLegend(position = "bottomright", group = "Species: Marine richness",
+            pal = pal_marine, values = rich_marine$species_richness,
+            title = "Marine richness", opacity = 0.8) %>%
+  addLegend(position = "bottomright", group = "Species: Terrestrial richness",
+            pal = pal_terr, values = rich_terr$species_richness,
+            title = "Terrestrial richness", opacity = 0.8)
+
+if (nrow(inns) > 0) {
+  m <- m %>%
+    addLegend(position = "bottomright", group = "Species: INNS",
+              pal = pal_inns, values = inns$realm,
+              title = "INNS by realm", opacity = 0.8)
+}
+
+m <- m %>%
+  addLegend(position = "bottomright", group = "Species: PMF",
+            colors = "#ce1256", labels = "PMF record",
+            title = "PMF", opacity = 0.8) %>%
+  addLegend(position = "bottomright", group = "Species: Habitat builders",
+            colors = "#d62728", labels = "Builder record",
+            title = "Habitat builders", opacity = 0.8)
+
+if (exists("det_grid") && nrow(det_grid) > 0) {
+  m <- m %>%
+    addLegend(position = "bottomright", group = "Species: INNS detections",
+              pal = pal_det, values = det_grid$n_detections,
+              title = "INNS detections", opacity = 0.8)
+}
+
+if (exists("first_grid") && nrow(first_grid) > 0) {
+  m <- m %>%
+    addLegend(position = "bottomright", group = "Species: INNS first detection",
+              pal = pal_first, values = first_grid$first_year,
+              title = "First detection year", opacity = 0.8)
+}
+
+# Woodland
+if (exists("habmos_wood") && !is.null(habmos_wood) && nrow(habmos_wood) > 0) {
+  wood_types <- unique(habmos_wood_wgs[[wood_col_var]])
+  m <- m %>%
+    addLegend(position = "bottomright", group = "Woodland: HabMoS",
+              pal = pal_wood, values = wood_types,
+              title = "Woodland type", opacity = 0.8)
+}
+
+# Threats
+if (exists("rivers_risk") && nrow(rivers_risk) > 0) {
+  m <- m %>%
+    addLegend(position = "bottomleft", group = "Threats: River risk",
+              pal = pal_risk, values = rivers_wgs$risk_value,
+              title = "River risk", opacity = 0.8)
+}
+
+m <- m %>%
+  addLegend(position = "bottomleft", group = "Threats: Pour points",
+            colors = "red", labels = "Pour point",
+            title = "Pour points", opacity = 0.8) %>%
+  addLegend(position = "bottomleft", group = "Threats: Vector (points)",
+            colors = "orange", labels = "Vector threat",
+            title = "Vector threats", opacity = 0.8)
+
+# Raster threat legends (stored during the addRasterImage loop above)
+# Re-create palettes for legends
+for (rt in raster_threat_specs) {
+  if (exists(rt$var, inherits = FALSE)) {
+    r_obj <- get(rt$var)
+    r_agg <- terra::aggregate(r_obj, fact = 4, fun = "mean", na.rm = TRUE)
+    r_wgs <- terra::project(r_agg, "EPSG:4326")
+    vals <- terra::values(r_wgs)[!is.na(terra::values(r_wgs))]
+    if (length(vals) > 0) {
+      pal_r <- colorNumeric(rt$pal, range(vals), na.color = "transparent")
+      m <- m %>%
+        addLegend(position = "bottomleft", group = rt$name,
+                  pal = pal_r, values = range(vals),
+                  title = gsub("Threats: ", "", rt$name), opacity = 0.8)
+    }
+  }
+}
+
 # --- Layer control ---
 overlay_groups <- c(
   "AOI", "D&G boundary", "SMR Solway", "Harbour limits",
@@ -1094,10 +1663,14 @@ overlay_groups <- c(
   "Saltmarsh: Known", "Saltmarsh: Indicators",
   "Oyster: Known", "Oyster: Historical", "Oyster: Potential", "Oyster: Indicators",
   "Sand Dunes: Known", "Sand Dunes: Restoration", "Sand Dunes: Indicators",
-  "Species: Marine richness", "Species: Terrestrial richness", "Species: INNS",
-  "Species: PMF",
+  "Woodland: HabMoS",
+  "Species: Marine richness", "Species: Terrestrial richness",
+  "Species: INNS", "Species: INNS detections", "Species: INNS first detection",
+  "Species: Habitat builders", "Species: PMF",
   "Threats: River risk", "Threats: Pour points",
-  "Threats: Vector (points)", "Threats: Vector (areas)"
+  "Threats: Vector (points)", "Threats: Vector (areas)",
+  "Threats: Fishing GFW", "Threats: Fishing under-12m",
+  "Threats: Marine exposure", "Threats: Cumulative pressure"
 )
 
 m <- m %>%
@@ -1114,8 +1687,123 @@ for (grp in hide_by_default) {
 }
 
 leaflet_path <- file.path(out_dir, "scamp_interactive_map.html")
-saveWidget(m, leaflet_path, selfcontained = TRUE)
+saveWidget(m, leaflet_path, selfcontained = FALSE)
 cat(sprintf("  Saved: %s\n", leaflet_path))
 
 cat("\n========== 07_plots.R COMPLETE ==========\n")
 cat(sprintf("All figures saved to: %s/\n", out_dir))
+
+
+# ============================================================
+# PRIORITY MAPS — PLAN (to be implemented below)
+# ============================================================
+#
+# Goal: produce aggregate spatial layers that help prioritise where to
+# protect, where to restore, and where to monitor for biodiversity uplift.
+#
+# ---------------------
+# LAYER 0: PRESSURE COUNT (management complexity)
+# ---------------------
+# For each 1km grid cell in the SMR, count how many of the ~15-20 normalised
+# pressure layers (from 05_localthreats.R) the cell falls in the top 50%.
+# This gives a "breadth of challenge" metric — a cell scoring 8/15 faces
+# pressures across many fronts regardless of individual intensity. Distinct
+# from cumulative pressure (which sums intensity). A high pressure count
+# means more different things to manage.
+#
+# ---------------------
+# LAYER 1: REFERENCE SITES
+# ---------------------
+# Named reference sites per habitat — these define "good condition":
+#   - Sand dunes:  RSPB Mersehead & Caerlaverock
+#   - Saltmarsh:   RSPB Mersehead & Crook of Baldoon
+#   - Oyster:      Loch Ryan (Heriot-Watt may provide reference data)
+#   - Seagrass:    SFP monitoring data if available; otherwise top 10%
+#                  richness + bottom 10% cumulative pressure where known
+#                  seagrass is present
+#
+# For each reference site, extract the community composition profile
+# (species list, richness, community similarity baseline). These profiles
+# become the benchmark that other cells are compared against in layers 2-4.
+# Where no named reference exists, use top/bottom 10% filter as fallback.
+# Load RSPB boundaries from data/processed/boundaries/rspb_reserves_scamp.gpkg.
+#
+# ---------------------
+# LAYER 2: PROTECTION PRIORITY
+# ---------------------
+# Cells with high existing biodiversity value under threat, not already
+# formally protected. Score from:
+#   - Community similarity to reference sites (whole-seascape Sorensen,
+#     already computed in 02_themeD_species.R) — high similarity = high
+#     current ecological value
+#   - Richness relative to reference site richness
+#   - Pressure count (Layer 0) — how many different threats need managing
+#   - Protection gap — outside existing SAC/SPA/SSSI polygons
+#
+# Interpretation of similarity + richness combinations:
+#   - High similarity + high richness = genuinely healthy → PROTECT
+#   - High similarity + low richness  = may be misleading → investigate
+#   - Low similarity  + high richness = unique community  → PROTECT (different)
+#   - Low similarity  + low richness  = degraded          → candidate for
+#                                                           restoration instead
+#
+# ---------------------
+# LAYER 3a: ACTIVE RESTORATION PRIORITY
+# ---------------------
+# Where to deploy cultch, plant seagrass, restore dune morphology — spending
+# capital that you don't want wasted.
+#   - Restoration opportunity: potential extent minus known extent
+#     (seagrass: requires intertidal bathy fix; oyster: historical locations
+#     that pass depth/substrate/salinity filters from 04_physical.R)
+#   - LOW current pressure — maximises return on investment
+#   - Proximity to source populations (coastalNet connectivity)
+#   - Physical suitability (passes all environmental filters)
+#
+# ---------------------
+# LAYER 3b: NATURAL RECOVERY SUPPORT PRIORITY
+# ---------------------
+# Where reducing pressures could accelerate recovery that's already plausible.
+#   - Same restoration opportunity layer as 3a
+#   - MEDIUM pressure band — too high and intervention fails; too low and
+#     there are no pressures to reduce, so you can't actively accelerate
+#     recovery through management
+#   - Connectivity to healthy source populations (coastalNet dispersal)
+#
+# ---------------------
+# LAYER 4: MONITORING PRIORITY
+# ---------------------
+# Where to detect recovery — prioritise where expected uplift is greatest,
+# avoiding ceiling effects from monitoring already-healthy ecosystems.
+#   - Hyperlocal beta diversity (queen-contiguity) is HIGH but richness
+#     is LOW — the cell's neighbours are diverse but the cell itself is
+#     depauperate. Strong recovery signal expected if pressures reduce.
+#   - Low community similarity to reference sites — more room for
+#     measurable convergence toward the reference profile
+#   - Connectivity to healthy source populations (coastalNet) — cells
+#     downstream of thriving habitat most likely to show colonisation
+#   - Pressure reduction potential — links to Layer 3b areas
+#
+# ---------------------
+# LAYER 5: COMBINED ACTION MAP
+# ---------------------
+# Classify each cell by dominant score:
+#   protect / restore (active) / restore (support) / monitor / data gap
+# Add as interactive leaflet layer with popup showing all component scores.
+# Produce static ggplot version for report, facetable by habitat.
+#
+# ---------------------
+# DEPENDENCIES
+# ---------------------
+# - coastalNet package (https://github.com/jorgeassis/coastalNet):
+#   load and explore in 04_physical.R, save connectivity matrix for SMR
+#   coastal cells. Feeds into restoration (which sites reachable from
+#   surviving populations) and monitoring (which sites downstream of
+#   sources, most likely to show colonisation).
+# - Intertidal bathymetry fix in 04_physical.R: GEBCO (~460m) cannot
+#   resolve narrow intertidal estuaries like the Rough Firth where known
+#   seagrass exists. Need higher-res DTM or adjusted upper depth limit
+#   with SMR masking to prevent flagging terrestrial areas.
+# - RSPB reserve boundaries: data/processed/boundaries/rspb_reserves_scamp.gpkg
+# - Community similarity matrices: outputs/species/community_similarity_matrix_*.rds
+# - Normalised pressure rasters: outputs/threats/normalised_layers/
+# ============================================================

@@ -2416,7 +2416,7 @@ gems_polys_clip <- gems_polys %>%
 
 pmf_records <- bind_rows(
   gems_pts_sf %>% st_drop_geometry() %>%
-    transmute(latin_name = SPECIES_NAME, common_name = COMMON_NAME, source = "GeMS_points"),
+    transmute(latin_name = SCIENTIFIC_NAME, common_name = COMMON_NAME, source = "GeMS_points"),
   gems_polys_clip %>% st_drop_geometry() %>%
     transmute(latin_name = SPECIES_NAME, common_name = COMMON_NAME, source = "GeMS_polygons")
 )
@@ -2426,10 +2426,10 @@ cat(sprintf("PMF in SCAMP AOI: %d records (%d points, %d polygon features) acros
     n_distinct(pmf_records$latin_name)))
 
 ## Save clipped outputs
-st_write(gems_pts_sf, "data/processed/species/pmf_points_scamp.gpkg",
+st_write(gems_pts_sf, "data/processed/species/pmf_points.gpkg",
          delete_dsn = TRUE, quiet = TRUE)
 if (nrow(gems_polys_clip) > 0) {
-  st_write(gems_polys_clip, "data/processed/species/pmf_polygons_scamp.gpkg",
+  st_write(gems_polys_clip, "data/processed/species/pmf_polygons.gpkg",
            delete_dsn = TRUE, quiet = TRUE)
 }
 

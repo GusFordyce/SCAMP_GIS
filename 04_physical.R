@@ -638,8 +638,30 @@ dir.create("figures/habitats", showWarnings = FALSE, recursive = TRUE)
 
 ## bathy_mask already exists from section 4 (GEBCO, EPSG:27700)
 bathy_r <- bathy_mask
-cat(sprintf("  Bathymetry grid: %d x %d | res: %.0fm\n",
+cat(sprintf("  GEBCO native grid: %d x %d | res: %.0fm\n",
             ncol(bathy_r), nrow(bathy_r), res(bathy_r)[1]))
+
+## ---- STEP 0: DOWNSCALE GEBCO AND CALIBRATE DEPTH LIMIT ----
+
+cat("\n-- Step 0: Downscale GEBCO to 300m and calibrate depth limit --\n")
+
+sg_known <- st_read("data/processed/seagrass_polygons_harmonised.gpkg", quiet = TRUE)
+if (st_crs(sg_known)$epsg != 27700) sg_known <- st_transform(sg_known, 27700)
+
+template_100 <- rast(ext(bathy_r), res = 100, crs = crs(bathy_r))
+bathy_r <- resample(bathy_r, template_100, method = "bilinear")
+names(bathy_r) <- "depth"
+cat(sprintf("  Downscaled grid: %d x %d | res: %.0fm\n",
+            ncol(bathy_r), nrow(bathy_r), res(bathy_r)[1]))
+
+sg_depth <- terra::extract(bathy_r, vect(sg_known), fun = "max", na.rm = TRUE)
+upper_limit <- ceiling(max(sg_depth$depth, na.rm = TRUE))
+cat(sprintf("  Max GEBCO elevation at known seagrass: %.1f m\n",
+            max(sg_depth$depth, na.rm = TRUE)))
+cat(sprintf("  Upper depth limit set to: %d m\n", upper_limit))
+
+smr_mask <- vect(smr_solway_bng)
+cat("  SMR boundary loaded for final masking\n")
 
 ## ---- 8a. Compute SPM mean from CMEMS daily NetCDFs ----
 
@@ -794,12 +816,13 @@ cat(sprintf("  SPM mean range: %.1f to %.1f g/m3\n",
             global(spm_mean_bng, "min", na.rm = TRUE)[[1]],
             global(spm_mean_bng, "max", na.rm = TRUE)[[1]]))
 
-## Low turbidity (SPM < 10): depth between -10m and +5m
-## Higher turbidity (SPM >= 10): depth between -5m and +5m
+## Low turbidity (SPM < 10): depth between -10m and upper_limit
+## Higher turbidity (SPM >= 10): depth between -5m and upper_limit
+## upper_limit calibrated from max GEBCO value at known seagrass sites (Step 0)
 ## Where SPM is NA (no satellite coverage), assume low turbidity
 low_turb   <- ifel(is.na(spm_mean_bng), 1, spm_mean_bng < 10)
-depth_low  <- (bathy_r >= -10) & (bathy_r <= 5)
-depth_high <- (bathy_r >= -5)  & (bathy_r <= 5)
+depth_low  <- (bathy_r >= -10) & (bathy_r <= upper_limit)
+depth_high <- (bathy_r >= -5)  & (bathy_r <= upper_limit)
 
 depth_mask <- ifel(low_turb == 1, depth_low, depth_high)
 names(depth_mask) <- "depth"
@@ -853,6 +876,11 @@ if (st_crs(sm_harm)$epsg != 27700) sm_harm <- st_transform(sm_harm, 27700)
 sm_rast <- rasterize(vect(sm_harm), bathy_r, field = 1, background = 0)
 sg_potential <- ifel(sm_rast == 1, 0, sg_potential)
 cat(sprintf("  After saltmarsh exclusion: %d pixels\n",
+            global(sg_potential, "sum", na.rm = TRUE)[[1]]))
+
+## Mask to SMR boundary (removes terrestrial areas)
+sg_potential <- mask(sg_potential, smr_mask)
+cat(sprintf("  After SMR masking: %d pixels\n",
             global(sg_potential, "sum", na.rm = TRUE)[[1]]))
 
 writeRaster(sg_potential, "outputs/habitats/seagrass_potential_raster.tif",

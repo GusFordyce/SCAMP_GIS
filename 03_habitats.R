@@ -612,6 +612,11 @@ cat("  Saved: figures/habitats/seagrass_all_cluster_bboxes.png\n")
 ## Update zoom_boxes for downstream use
 zoom_boxes <- all_boxes
 
+dir.create("data/processed/habitats", recursive = TRUE, showWarnings = FALSE)
+st_write(all_boxes, "data/processed/habitats/seagrass_cluster_boxes.gpkg",
+         delete_layer = TRUE, quiet = TRUE)
+cat("  Saved: data/processed/habitats/seagrass_cluster_boxes.gpkg\n")
+
 ## Individual cluster zoom plots
 for (i in seq_len(nrow(all_boxes))) {
   box_i <- all_boxes[i, ]
@@ -1385,6 +1390,10 @@ sm_cluster_boxes <- do.call(rbind, lapply(sort(unique(sm_all_polys$cluster)), fu
 
 cat(sprintf("\n  Combined saltmarsh clusters: %d\n", nrow(sm_cluster_boxes)))
 
+st_write(sm_cluster_boxes, "data/processed/habitats/saltmarsh_cluster_boxes.gpkg",
+         delete_layer = TRUE, quiet = TRUE)
+cat("  Saved: data/processed/habitats/saltmarsh_cluster_boxes.gpkg\n")
+
 ## ---- 2e. Per-cluster plots — SSS vs WCMC comparison ----
 
 cat("\n-- 2e. Per-cluster comparison plots --\n")
@@ -1725,6 +1734,11 @@ if (nrow(hist_oy) > 0) {
               paste(unique(st_geometry_type(hist_oy)), collapse = ", ")))
 }
 
+dir.create("data/processed/species", recursive = TRUE, showWarnings = FALSE)
+st_write(hist_oy, "data/processed/species/oyster_historical_locations.gpkg",
+         delete_layer = TRUE, quiet = TRUE)
+cat("  Saved: data/processed/species/oyster_historical_locations.gpkg\n")
+
 ## Separate polygons and points from historical data
 hist_oy_geom_types <- st_geometry_type(hist_oy)
 hist_oy_py <- hist_oy[hist_oy_geom_types %in% c("POLYGON", "MULTIPOLYGON"), ]
@@ -2013,6 +2027,10 @@ if (nrow(ind_oy_boxes) > 0 && nrow(oy_boxes) > 0) {
 }
 
 cat(sprintf("  Merged oyster clusters (all sources): %d\n", nrow(oy_boxes)))
+
+st_write(oy_boxes, "data/processed/habitats/oyster_cluster_boxes.gpkg",
+         delete_layer = TRUE, quiet = TRUE)
+cat("  Saved: data/processed/habitats/oyster_cluster_boxes.gpkg\n")
 
 ## Plot merged clusters with all data
 p_oy_boxes_all <- ggplot() +
@@ -2439,6 +2457,10 @@ for (j in seq_len(nrow(dune_boxes))) {
   n_in <- sum(lengths(st_intersects(habmos_dunes_bng, dune_boxes[j, ])) > 0)
   cat(sprintf("    %s: %d polygons\n", dune_boxes$name[j], n_in))
 }
+
+st_write(dune_boxes, "data/processed/habitats/dune_cluster_boxes.gpkg",
+         delete_layer = TRUE, quiet = TRUE)
+cat("  Saved: data/processed/habitats/dune_cluster_boxes.gpkg\n")
 
 ## Plot dunes with cluster boxes
 p_dunes_clusters <- ggplot() +
