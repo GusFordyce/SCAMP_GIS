@@ -15,6 +15,7 @@ require(ggplot2)
 require(ggspatial)
 require(ncdf4)
 require(jsonlite)
+require(ggnewscale)
 
 ##=====================================================================
 ## 0. SETUP — Boundaries, AOI, directories, CMEMS helper
@@ -881,6 +882,24 @@ cat(sprintf("  After saltmarsh exclusion: %d pixels\n",
 ## Mask to SMR boundary (removes terrestrial areas)
 sg_potential <- mask(sg_potential, smr_mask)
 cat(sprintf("  After SMR masking: %d pixels\n",
+            global(sg_potential, "sum", na.rm = TRUE)[[1]]))
+
+## Override energy filter within 1km of known seagrass
+## EUSeaMap energy is too coarse for sheltered estuaries
+sg_buf <- st_buffer(sg_known, 1000)
+sg_override <- rasterize(vect(sg_buf), bathy_r, field = 1, background = 0)
+sg_pot_override <- sg_override * depth_mask * sal_mask
+sg_pot_override <- ifel(sm_rast == 1, 0, sg_pot_override)
+sg_pot_override <- mask(sg_pot_override, smr_mask)
+sg_potential <- ifel(sg_pot_override == 1, 1, sg_potential)
+cat(sprintf("  After 1km buffer energy override: %d pixels\n",
+            global(sg_potential, "sum", na.rm = TRUE)[[1]]))
+
+## Force-include known seagrass polygons
+sg_known_rast <- rasterize(vect(sg_known), bathy_r, field = 1, background = 0)
+sg_known_rast <- mask(sg_known_rast, smr_mask)
+sg_potential <- ifel(sg_known_rast == 1, 1, sg_potential)
+cat(sprintf("  After known seagrass inclusion: %d pixels\n",
             global(sg_potential, "sum", na.rm = TRUE)[[1]]))
 
 writeRaster(sg_potential, "outputs/habitats/seagrass_potential_raster.tif",
@@ -1921,3 +1940,417 @@ cat(sprintf("  Step 10 (vectorised):             %d polygons | %.1f ha\n",
             nrow(oy_poly), sum(oy_poly$area_ha)))
 
 cat("\n=== Native Oyster Potential Model complete ===\n")
+
+
+##=====================================================================
+## 10. COASTAL OCEANOGRAPHIC CONNECTIVITY (coastalNet)
+##=====================================================================
+##
+## Uses the coastalNet package (Assis et al. 2025, Scientific Data)
+## to explore oceanographic connectivity between habitat sites.
+## Database: >195 million connectivity events between >26,000
+## coastal hexagons, modelled over 180-day dispersal windows.
+##=====================================================================
+
+cat("\n\n=== 10. COASTAL OCEANOGRAPHIC CONNECTIVITY ===\n")
+
+if (!requireNamespace("coastalNet", quietly = TRUE)) {
+  cat("  Installing coastalNet from GitHub...\n")
+  remotes::install_github("jorgeassis/coastalNet")
+}
+library(coastalNet)
+
+## ---- 10a. Load connectivity database (already downloaded) ----
+
+cat("\n-- 10a. Load connectivity database --\n")
+
+conn_db_path <- "data/raw/physical/oceanographicConnectivity.RData"
+stopifnot("Connectivity RData not found" = file.exists(conn_db_path))
+
+conn_db <- getDataBase(fileName = conn_db_path)
+
+cat("  Database loaded\n")
+cat(sprintf("  Class: %s\n", paste(class(conn_db), collapse = ", ")))
+cat(sprintf("  Structure: %s\n", paste(names(conn_db), collapse = ", ")))
+
+## ---- 10b. Load hexagon grid ----
+## Required lookup table (source/sink locations) for every getHexagonID
+## call below — NOT bundled inside conn_db, loaded separately
+
+cat("\n-- 10b. Load hexagon grid --\n")
+
+hexagonCells <- loadHexagons()
+cat(sprintf("  Hexagon cells loaded: %d\n", nrow(hexagonCells)))
+
+## ---- 10c. Identify hexagons within the SCAMP study region ----
+
+cat("\n-- 10c. Identify hexagons in study region --\n")
+
+aoi_wgs <- st_transform(scamp_aoi_sf, 4326)
+
+hexagonIDRegion <- getHexagonID(
+  obj = aoi_wgs,
+  hexagonCells = hexagonCells,
+  level = "extent",
+  buffer = 0.1,
+  print = FALSE
+)
+
+cat(sprintf("  Hexagon sites in study region: %d\n",
+            length(unique(unlist(hexagonIDRegion)))))
+
+## ---- 10d. Get connectivity events within the region ----
+
+cat("\n-- 10d. Get connectivity events --\n")
+
+connectivityEvents <- getConnectivityEvents(
+  connectivity = conn_db,
+  hexagonID = hexagonIDRegion,
+  period = 180
+)
+
+cat(sprintf("  Connectivity events retrieved: %d\n", nrow(connectivityEvents)))
+
+## ---- 10e. Classify study-region hexagons: existing vs potential ----
+## At 8.45km hexagon edge length, the grid itself is coarser than any
+## custom clustering we could build — with only ~19 hexagons covering the
+## whole seascape, no need to invent cluster geometry. Instead classify
+## each hexagon directly by what it overlaps: known extent ("existing",
+## a source population), physically-suitable-but-unoccupied ("potential",
+## a restoration target), or neither.
+
+cat("\n-- 10e. Classify hexagons: existing vs potential habitat --\n")
+
+## Load known/potential layers from disk if not already in memory (avoids
+## needing to re-run all of Sections 8/9 just to reach this step)
+if (!exists("sg_known")) {
+  sg_known <- st_read("data/processed/seagrass_polygons_harmonised.gpkg", quiet = TRUE)
+  cat("  Loaded sg_known from disk\n")
+}
+if (!exists("sg_poly")) {
+  sg_poly <- st_read("outputs/habitats/seagrass_potential_solway.gpkg", quiet = TRUE)
+  cat("  Loaded sg_poly from disk\n")
+}
+if (!exists("oy_known_sf")) {
+  oy_known_sf <- st_read("data/processed/species/oyster_known_extent.gpkg", quiet = TRUE) %>%
+    st_make_valid()
+  cat("  Loaded oy_known_sf from disk\n")
+}
+if (!exists("oy_poly")) {
+  oy_poly <- st_read("outputs/habitats/oyster_potential_solway.gpkg", quiet = TRUE)
+  cat("  Loaded oy_poly from disk\n")
+}
+
+hexRegion <- hexagonCells[hexagonCells$ID %in% unlist(hexagonIDRegion), ]
+cat(sprintf("  Study-region hexagons: %d\n", nrow(hexRegion)))
+
+classify_hexagons <- function(hexRegion, known_sf, potential_sf) {
+  known_wgs <- st_transform(known_sf, 4326)
+  potential_wgs <- st_transform(potential_sf, 4326)
+
+  is_existing <- lengths(st_intersects(hexRegion, known_wgs)) > 0
+  is_suitable <- lengths(st_intersects(hexRegion, potential_wgs)) > 0
+  is_potential <- is_suitable & !is_existing
+
+  ## status label is for display only (10h/10i classification map) — a
+  ## hexagon can be "Existing" and still contain plenty of fine-scale
+  ## restoration-opportunity cells (e.g. one small known patch plus lots
+  ## of unoccupied suitable habitat within the same 8.45km hexagon)
+  status <- ifelse(is_existing, "Existing",
+                   ifelse(is_potential, "Potential", "Neither"))
+
+  list(
+    hexClassified = hexRegion %>% mutate(status = status),
+    idExisting = setNames(as.list(as.character(hexRegion$ID[is_existing])),
+                          as.character(hexRegion$ID[is_existing])),
+    idPotential = setNames(as.list(as.character(hexRegion$ID[is_potential])),
+                           as.character(hexRegion$ID[is_potential])),
+    ## idSuitable: ALL hexagons overlapping the potential layer, regardless
+    ## of existing status — this is the correct "to" target set for scoring
+    ## restoration-opportunity cells, since those cells can sit inside a
+    ## hexagon that also happens to contain existing habitat elsewhere
+    idSuitable = setNames(as.list(as.character(hexRegion$ID[is_suitable])),
+                          as.character(hexRegion$ID[is_suitable]))
+  )
+}
+
+sgHex <- classify_hexagons(hexRegion, sg_known, sg_poly)
+cat(sprintf("  Seagrass — existing: %d | potential-only: %d | neither: %d | all suitable: %d\n",
+            length(sgHex$idExisting), length(sgHex$idPotential),
+            sum(sgHex$hexClassified$status == "Neither"), length(sgHex$idSuitable)))
+
+oyHex <- classify_hexagons(hexRegion, oy_known_sf, oy_poly)
+cat(sprintf("  Oyster — existing: %d | potential-only: %d | neither: %d | all suitable: %d\n",
+            length(oyHex$idExisting), length(oyHex$idPotential),
+            sum(oyHex$hexClassified$status == "Neither"), length(oyHex$idSuitable)))
+
+## ---- 10f. Pairwise connectivity: existing -> potential (seagrass) ----
+
+cat("\n-- 10f. Pairwise connectivity: seagrass existing -> potential --\n")
+
+## steppingStone=FALSE: even parallelCores=1 still spins up a PSOCK
+## cluster over a local socket for stepping-stone computation, and that
+## socket setup is what's failing (Windows Firewall / antivirus blocking
+## loopback connections — not something core-count tuning can fix).
+## Direct connectivity avoids the parallel backend entirely: it reads
+## straight off the events table, no subprocess involved. Trade-off:
+## captures direct 180-day dispersal only, not multi-hop stepping-stone
+## paths — but it's a working baseline; revisit stepping-stone once the
+## local socket/firewall setup is sorted separately from this script.
+pairwiseSeagrass <- getPairwiseConnectivity(
+  connectivityEvents = connectivityEvents,
+  hexagonIDFrom = sgHex$idExisting,
+  hexagonIDTo = sgHex$idSuitable,
+  connType = "Forward",
+  value = "Probability",
+  steppingStone = FALSE
+)
+
+cat(sprintf("  Seagrass connectivity matrix: %d x %d\n",
+            nrow(pairwiseSeagrass$connectivityMatrix),
+            ncol(pairwiseSeagrass$connectivityMatrix)))
+print(round(pairwiseSeagrass$connectivityMatrix, 4))
+
+saveRDS(pairwiseSeagrass, "outputs/physical/coastalnet_seagrass_connectivity.rds")
+cat("  Saved: outputs/physical/coastalnet_seagrass_connectivity.rds\n")
+
+## ---- 10g. Pairwise connectivity: existing -> potential (oyster) ----
+
+cat("\n-- 10g. Pairwise connectivity: oyster existing -> potential --\n")
+
+pairwiseOyster <- getPairwiseConnectivity(
+  connectivityEvents = connectivityEvents,
+  hexagonIDFrom = oyHex$idExisting,
+  hexagonIDTo = oyHex$idSuitable,
+  connType = "Forward",
+  value = "Probability",
+  steppingStone = FALSE
+)
+
+cat(sprintf("  Oyster connectivity matrix: %d x %d\n",
+            nrow(pairwiseOyster$connectivityMatrix),
+            ncol(pairwiseOyster$connectivityMatrix)))
+print(round(pairwiseOyster$connectivityMatrix, 4))
+
+saveRDS(pairwiseOyster, "outputs/physical/coastalnet_oyster_connectivity.rds")
+cat("  Saved: outputs/physical/coastalnet_oyster_connectivity.rds\n")
+
+## ---- 10h. Map seagrass hexagon classification + connectivity ----
+
+cat("\n-- 10h. Map seagrass connectivity --\n")
+
+mappedSeagrass <- mapConnectivity(
+  obj = sgHex$hexClassified,
+  featureName = "ID",
+  connectivityPairs = pairwiseSeagrass$connectivityPairs
+)
+
+p_conn_sg <- ggplot() +
+  geom_sf(data = las_dg_bng %>% st_transform(4326), fill = "grey92",
+          colour = "grey50", linewidth = 0.3) +
+  geom_sf(data = sgHex$hexClassified, aes(fill = status), alpha = 0.4,
+          colour = "grey30", linewidth = 0.2) +
+  scale_fill_manual(name = "Hexagon status",
+    values = c("Existing" = "#1b7837", "Potential" = "#ff7f00", "Neither" = NA),
+    na.value = NA) +
+  ggnewscale::new_scale_fill() +
+  geom_sf(data = mappedSeagrass$lineConnections, aes(colour = Value),
+          linewidth = 0.8, alpha = 0.85) +
+  scale_colour_viridis_c(name = "Connectivity\nprobability", option = "magma",
+                         trans = "log1p") +
+  labs(title = "Seagrass Existing -> Potential Habitat Connectivity (coastalNet)",
+       subtitle = "Forward direct probability, 180-day dispersal window") +
+  theme_minimal() + coord_sf(crs = 4326)
+
+ggsave("figures/physical/coastalnet_seagrass_connectivity.png", p_conn_sg,
+       width = 14, height = 10, units = "in", dpi = 300)
+cat("  Saved: figures/physical/coastalnet_seagrass_connectivity.png\n")
+
+## ---- 10i. Map oyster hexagon classification + connectivity ----
+
+cat("\n-- 10i. Map oyster connectivity --\n")
+
+mappedOyster <- mapConnectivity(
+  obj = oyHex$hexClassified,
+  featureName = "ID",
+  connectivityPairs = pairwiseOyster$connectivityPairs
+)
+
+p_conn_oy <- ggplot() +
+  geom_sf(data = las_dg_bng %>% st_transform(4326), fill = "grey92",
+          colour = "grey50", linewidth = 0.3) +
+  geom_sf(data = oyHex$hexClassified, aes(fill = status), alpha = 0.4,
+          colour = "grey30", linewidth = 0.2) +
+  scale_fill_manual(name = "Hexagon status",
+    values = c("Existing" = "#1b7837", "Potential" = "#ff7f00", "Neither" = NA),
+    na.value = NA) +
+  ggnewscale::new_scale_fill() +
+  geom_sf(data = mappedOyster$lineConnections, aes(colour = Value),
+          linewidth = 0.8, alpha = 0.85) +
+  scale_colour_viridis_c(name = "Connectivity\nprobability", option = "magma",
+                         trans = "log1p") +
+  labs(title = "Oyster Existing -> Potential Habitat Connectivity (coastalNet)",
+       subtitle = "Forward direct probability, 180-day dispersal window") +
+  theme_minimal() + coord_sf(crs = 4326)
+
+ggsave("figures/physical/coastalnet_oyster_connectivity.png", p_conn_oy,
+       width = 14, height = 10, units = "in", dpi = 300)
+cat("  Saved: figures/physical/coastalnet_oyster_connectivity.png\n")
+
+## ---- 10j. Collapse connectivity matrices to a per-hexagon score ----
+## Each "Potential" hexagon has a connectivity value from every "Existing"
+## hexagon (a column in connectivityMatrix). Take MAX across sources —
+## "best chance of natural colonisation from any nearby population" —
+## rather than mean (dilutes a strong single connection with irrelevant
+## distant zeros) or sum (double-counts and isn't meaningful for
+## probabilities). Join the resulting score onto the classified hexagons
+## and save as a spatial layer for 07_plots.R to join onto restoration-
+## opportunity cells (Layer 3a/3b).
+
+cat("\n-- 10j. Collapse connectivity matrices to per-hexagon score --\n")
+
+score_potential_hexagons <- function(hexClassified, connectivityMatrix) {
+  ## connectivityMatrix: rows = existing (from) hexagons, cols = the
+  ## broader idSuitable (to) set — every hexagon overlapping the potential
+  ## layer gets a score here, not just ones classified purely "Potential".
+  ## A hexagon labelled "Existing" can still carry a score: it may contain
+  ## both existing habitat AND unoccupied restoration-opportunity cells,
+  ## and those cells need a connectivity value too.
+  max_score <- apply(connectivityMatrix, 2, max, na.rm = TRUE)
+  max_score[!is.finite(max_score)] <- NA_real_
+
+  score_df <- data.frame(ID = as.character(colnames(connectivityMatrix)),
+                         connectivity_score = as.numeric(max_score))
+
+  hexClassified %>%
+    mutate(ID = as.character(ID)) %>%
+    left_join(score_df, by = "ID")
+}
+
+sgHexScored <- score_potential_hexagons(sgHex$hexClassified, pairwiseSeagrass$connectivityMatrix)
+cat(sprintf("  Seagrass potential hexagons scored: %d (score range %.4f to %.4f)\n",
+            sum(!is.na(sgHexScored$connectivity_score)),
+            min(sgHexScored$connectivity_score, na.rm = TRUE),
+            max(sgHexScored$connectivity_score, na.rm = TRUE)))
+
+oyHexScored <- score_potential_hexagons(oyHex$hexClassified, pairwiseOyster$connectivityMatrix)
+cat(sprintf("  Oyster potential hexagons scored: %d (score range %.4f to %.4f)\n",
+            sum(!is.na(oyHexScored$connectivity_score)),
+            min(oyHexScored$connectivity_score, na.rm = TRUE),
+            max(oyHexScored$connectivity_score, na.rm = TRUE)))
+
+st_write(sgHexScored, "outputs/physical/seagrass_connectivity_hexagons.gpkg",
+         delete_layer = TRUE, quiet = TRUE)
+cat("  Saved: outputs/physical/seagrass_connectivity_hexagons.gpkg\n")
+
+st_write(oyHexScored, "outputs/physical/oyster_connectivity_hexagons.gpkg",
+         delete_layer = TRUE, quiet = TRUE)
+cat("  Saved: outputs/physical/oyster_connectivity_hexagons.gpkg\n")
+
+## ---- 10k. Saltmarsh connectivity (existing sites only) ----
+## No saltmarsh restoration/suitability model exists yet, so there is no
+## "potential" destination set — this instead models connectivity BETWEEN
+## existing saltmarsh sites. Framing: saltmarsh vegetation doesn't disperse
+## via ocean currents (seed/rhizome spread) and the bird community doesn't
+## either (flight) — but the FISH and MARINE INVERTEBRATES that use
+## saltmarsh creeks/pools as nursery and foraging habitat DO disperse as
+## larvae via ocean currents. coastalNet's current-driven connectivity is
+## valid here specifically for that fauna, not the marsh plants or birds.
+
+cat("\n-- 10k. Saltmarsh connectivity (existing sites, fish/invert fauna) --\n")
+
+if (!exists("sm_harm")) {
+  sm_harm <- st_read("data/processed/species/saltmarsh_harmonised.gpkg", quiet = TRUE)
+  cat("  Loaded sm_harm from disk\n")
+}
+
+sm_harm_wgs <- st_transform(sm_harm, 4326)
+is_sm_existing <- lengths(st_intersects(hexRegion, sm_harm_wgs)) > 0
+
+smHex <- list(
+  hexClassified = hexRegion %>% mutate(status = ifelse(is_sm_existing, "Existing", "Neither")),
+  idExisting = setNames(as.list(as.character(hexRegion$ID[is_sm_existing])),
+                        as.character(hexRegion$ID[is_sm_existing]))
+)
+cat(sprintf("  Saltmarsh hexagons — existing: %d of %d study-region hexagons\n",
+            length(smHex$idExisting), nrow(hexRegion)))
+
+pairwiseSaltmarsh <- getPairwiseConnectivity(
+  connectivityEvents = connectivityEvents,
+  hexagonIDFrom = smHex$idExisting,
+  connType = "Forward",
+  value = "Probability",
+  steppingStone = FALSE
+)
+
+cat(sprintf("  Saltmarsh connectivity matrix: %d x %d\n",
+            nrow(pairwiseSaltmarsh$connectivityMatrix),
+            ncol(pairwiseSaltmarsh$connectivityMatrix)))
+print(round(pairwiseSaltmarsh$connectivityMatrix, 4))
+
+saveRDS(pairwiseSaltmarsh, "outputs/physical/coastalnet_saltmarsh_connectivity.rds")
+cat("  Saved: outputs/physical/coastalnet_saltmarsh_connectivity.rds\n")
+
+## Score: for each saltmarsh hexagon, its max connectivity to OTHER
+## saltmarsh hexagons (self-connectivity excluded) — how well-connected
+## that marsh's fish/invert nursery population is to other marsh nurseries
+sm_mat <- pairwiseSaltmarsh$connectivityMatrix
+diag(sm_mat) <- NA
+sm_max_score <- apply(sm_mat, 2, max, na.rm = TRUE)
+sm_max_score[!is.finite(sm_max_score)] <- NA_real_
+
+sm_score_df <- data.frame(ID = as.character(colnames(sm_mat)),
+                          connectivity_score = as.numeric(sm_max_score))
+
+smHexScored <- smHex$hexClassified %>%
+  mutate(ID = as.character(ID)) %>%
+  left_join(sm_score_df, by = "ID")
+
+cat(sprintf("  Saltmarsh hexagons scored: %d (score range %.4f to %.4f)\n",
+            sum(!is.na(smHexScored$connectivity_score)),
+            min(smHexScored$connectivity_score, na.rm = TRUE),
+            max(smHexScored$connectivity_score, na.rm = TRUE)))
+
+st_write(smHexScored, "outputs/physical/saltmarsh_connectivity_hexagons.gpkg",
+         delete_layer = TRUE, quiet = TRUE)
+cat("  Saved: outputs/physical/saltmarsh_connectivity_hexagons.gpkg\n")
+
+## ---- 10l. Map saltmarsh connectivity ----
+
+cat("\n-- 10l. Map saltmarsh connectivity --\n")
+
+mappedSaltmarsh <- mapConnectivity(
+  obj = smHex$hexClassified,
+  featureName = "ID",
+  connectivityPairs = pairwiseSaltmarsh$connectivityPairs
+)
+
+p_conn_sm <- ggplot() +
+  geom_sf(data = las_dg_bng %>% st_transform(4326), fill = "grey92",
+          colour = "grey50", linewidth = 0.3) +
+  geom_sf(data = smHex$hexClassified, aes(fill = status), alpha = 0.4,
+          colour = "grey30", linewidth = 0.2) +
+  scale_fill_manual(name = "Hexagon status",
+    values = c("Existing" = "#66a61e", "Neither" = NA), na.value = NA) +
+  ggnewscale::new_scale_fill() +
+  geom_sf(data = mappedSaltmarsh$lineConnections, aes(colour = Value),
+          linewidth = 0.8, alpha = 0.85) +
+  scale_colour_viridis_c(name = "Connectivity\nprobability", option = "magma",
+                         trans = "log1p") +
+  labs(title = "Saltmarsh Site Connectivity — Fish & Marine Invertebrates (coastalNet)",
+       subtitle = "Forward direct probability, 180-day dispersal window | Existing sites only, no restoration model yet") +
+  theme_minimal() + coord_sf(crs = 4326)
+
+ggsave("figures/physical/coastalnet_saltmarsh_connectivity.png", p_conn_sm,
+       width = 14, height = 10, units = "in", dpi = 300)
+cat("  Saved: figures/physical/coastalnet_saltmarsh_connectivity.png\n")
+
+cat("\n=== Coastal Connectivity exploration complete ===\n")
+cat("  Saved outputs: outputs/physical/coastalnet_seagrass_connectivity.rds\n")
+cat("                 outputs/physical/coastalnet_oyster_connectivity.rds\n")
+cat("                 outputs/physical/coastalnet_saltmarsh_connectivity.rds\n")
+cat("                 outputs/physical/seagrass_connectivity_hexagons.gpkg\n")
+cat("                 outputs/physical/oyster_connectivity_hexagons.gpkg\n")
+cat("                 outputs/physical/saltmarsh_connectivity_hexagons.gpkg\n")
+cat("  Next steps: spatially join *_connectivity_hexagons.gpkg onto\n")
+cat("  restoration-opportunity cells to build Layer 3a/3b in 07_plots.R\n")

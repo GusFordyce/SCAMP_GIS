@@ -4248,6 +4248,40 @@ cat(sprintf("  Total restoration area: %.1f ha (Tier 1: %.1f ha, Tier 2: %.1f ha
             sum(buff_sites$area_ha[buff_sites$tier == 1]),
             sum(buff_sites$area_ha[buff_sites$tier == 2])))
 
+## ---- 4e. Sand Dune Suitability Raster (tier-weighted) ----
+## Rasterizes the tiered restoration-potential polygons above into a
+## weighted suitability surface for the Layer 3a/3b priority pipeline,
+## matching seagrass/oyster's suitable_r pattern but preserving the tier
+## distinction rather than collapsing to binary: Tier 1 (higher-priority
+## accommodation space) = 1.0, Tier 2 = 0.5, background = 0.
+
+cat("\n-- 4e. Sand dune suitability raster (tier-weighted) --\n")
+
+if (!exists("buff_sites")) {
+  buff_sites <- st_read("outputs/habitats/sand_dune_restoration_potential.gpkg", quiet = TRUE)
+  cat("  Loaded buff_sites from disk\n")
+}
+if (!exists("cop30_bng")) {
+  cop30_bng <- rast("outputs/physical/cop30_dem_solway.tif")
+  cat("  Loaded cop30_bng from disk\n")
+}
+
+buff_sites$suitability <- ifelse(buff_sites$tier == 1, 1.0, 0.5)
+
+dune_suitable_r <- rasterize(vect(buff_sites), cop30_bng, field = "suitability", background = 0)
+dune_suitable_r <- mask(dune_suitable_r, vect(scamp_aoi_sf))
+names(dune_suitable_r) <- "suitable"
+
+cat(sprintf("  Dune suitability raster: %d x %d | res: %.0fm\n",
+            ncol(dune_suitable_r), nrow(dune_suitable_r), res(dune_suitable_r)[1]))
+cat(sprintf("  Tier 1 (1.0) cells: %d | Tier 2 (0.5) cells: %d\n",
+            sum(values(dune_suitable_r) == 1, na.rm = TRUE),
+            sum(values(dune_suitable_r) == 0.5, na.rm = TRUE)))
+
+writeRaster(dune_suitable_r, "outputs/habitats/sand_dune_potential_raster.tif",
+            overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+cat("  Saved: outputs/habitats/sand_dune_potential_raster.tif\n")
+
 # ============================================================
 # Combined habitat GPKG: all known + potential layers
 # ============================================================

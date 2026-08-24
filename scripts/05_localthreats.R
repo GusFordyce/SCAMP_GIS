@@ -974,6 +974,45 @@ head(st_drop_geometry(cefas_crop), 5)
 
 
 # ------------------------------------------------------------------
+# HydroBASINS level 12 sub-catchments — the unit of analysis for
+# everything from Step 6 onwards (risk summaries, pour-point
+# aggregation, land-cover composition). CEFAS catchments remain in use
+# earlier (HLCM correction, SCIMAP source-risk cropping) and stay as the
+# coarse extent/cropping reference throughout. Built once in
+# 07_plots.R (levels 7/9/10/11 tested, 12 adopted — see that script for
+# the rationale) and reloaded here from disk.
+# ------------------------------------------------------------------
+
+cat("\n----- HydroBASINS level 12 sub-catchments -----\n")
+
+hybas_lv12_path <- "outputs/catchments/hybas_lev12_dg.gpkg"
+stopifnot("HydroBASINS lvl 12 not found — run the HydroBASINS section in 07_plots.R first" =
+            file.exists(hybas_lv12_path))
+
+hybas_lv12_dg <- st_read(hybas_lv12_path, quiet = TRUE) %>%
+  st_transform(27700) %>% st_make_valid()
+cat(sprintf("  HydroBASINS lvl 12 loaded: %d features\n", nrow(hybas_lv12_dg)))
+cat(sprintf("  Columns: %s\n", paste(names(hybas_lv12_dg), collapse = ", ")))
+
+# HydroBASINS carries no human-readable name — attach the nearest CEFAS
+# catchment's name purely as a descriptive label for printed tables/plots.
+# Grouping/joining throughout uses HYBAS_ID, never this label.
+hybas_lv12_dg <- st_join(hybas_lv12_dg, cefas_crop[, "S_CatNAME"],
+                         join = st_nearest_feature)
+
+p_hybas <- ggplot() +
+  geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
+  geom_sf(data = hybas_lv12_dg, fill = "lightblue", colour = "steelblue",
+          alpha = 0.4, linewidth = 0.3) +
+  geom_sf(data = scamp_aoi_sf, fill = NA, colour = "black", linewidth = 0.5) +
+  labs(title = "HydroBASINS Level 12 Sub-Catchments") +
+  map_theme + coord_sf(crs = 27700)
+ggsave("figures/threats/hybas_lv12_catchments.png", p_hybas,
+       width = 12, height = 10, units = "in", dpi = 300)
+cat("  Saved: figures/threats/hybas_lv12_catchments.png\n")
+
+
+# ------------------------------------------------------------------
 # OpenRivers (masked to catchments)
 # ------------------------------------------------------------------
 
@@ -1877,18 +1916,62 @@ zip("outputs/catchments/cefas_catchments_crop.zip", shp_files, flags = "-j")
 cat("  Saved: outputs/catchments/cefas_catchments_crop.zip\n")
 
 
-# --- 4c. Extract land cover per CEFAS catchment ---
+# --- 4c (DEFUNCT): Extract land cover per CEFAS catchment ---
+# Superseded — catchment unit switched to HydroBASINS lvl 12 throughout
+# Step 6 onwards. Left commented rather than deleted.
+#
+# cat("\n----- 4c. Extract land cover per catchment -----\n")
+#
+# hlcm_extract <- terra::extract(hlcm_reclass, vect(cefas_crop))
+# cat(sprintf("  Total pixels extracted: %d\n", nrow(hlcm_extract)))
+#
+# lc_colname <- names(hlcm_extract)[2]
+# cat(sprintf("  Land cover column name: %s\n", lc_colname))
+#
+# hlcm_extract$S_Catchmt <- cefas_crop$S_Catchmt[hlcm_extract$ID]
+# hlcm_extract$S_CatNAME <- cefas_crop$S_CatNAME[hlcm_extract$ID]
+#
+# hlcm_extract <- hlcm_extract[!is.na(hlcm_extract[[lc_colname]]), ]
+# cat(sprintf("  Non-NA pixels: %d\n", nrow(hlcm_extract)))
+#
+# names(hlcm_extract)[names(hlcm_extract) == lc_colname] <- "lc_value"
+#
+# lc_counts <- hlcm_extract %>%
+#   group_by(S_Catchmt, S_CatNAME, lc_value) %>%
+#   summarise(n_pixels = n(), .groups = "drop") %>%
+#   left_join(lc_lookup_reclass, by = "lc_value")
+#
+# catch_totals <- lc_counts %>%
+#   group_by(S_Catchmt, S_CatNAME) %>%
+#   summarise(total_pixels = sum(n_pixels), .groups = "drop")
+#
+# lc_props <- lc_counts %>%
+#   left_join(catch_totals, by = c("S_Catchmt", "S_CatNAME")) %>%
+#   mutate(proportion = n_pixels / total_pixels)
+#
+# cat(sprintf("  Catchments with land cover data: %d\n", nrow(catch_totals)))
+# print(catch_totals)
+#
+# lc_freq <- lc_counts %>%
+#   group_by(eunis_code, eunis_desc) %>%
+#   summarise(total_pixels = sum(n_pixels), .groups = "drop") %>%
+#   arrange(desc(total_pixels)) %>%
+#   mutate(pct = round(100 * total_pixels / sum(total_pixels), 1))
+# print(lc_freq)
 
-cat("\n----- 4c. Extract land cover per catchment -----\n")
 
-hlcm_extract <- terra::extract(hlcm_reclass, vect(cefas_crop))
+# --- 4c (REVISED): Extract land cover per HydroBASINS lvl 12 catchment ---
+
+cat("\n----- 4c (revised): Extract land cover per HydroBASINS catchment -----\n")
+
+hlcm_extract <- terra::extract(hlcm_reclass, vect(hybas_lv12_dg))
 cat(sprintf("  Total pixels extracted: %d\n", nrow(hlcm_extract)))
 
 lc_colname <- names(hlcm_extract)[2]
 cat(sprintf("  Land cover column name: %s\n", lc_colname))
 
-hlcm_extract$S_Catchmt <- cefas_crop$S_Catchmt[hlcm_extract$ID]
-hlcm_extract$S_CatNAME <- cefas_crop$S_CatNAME[hlcm_extract$ID]
+hlcm_extract$HYBAS_ID <- hybas_lv12_dg$HYBAS_ID[hlcm_extract$ID]
+hlcm_extract$S_CatNAME <- hybas_lv12_dg$S_CatNAME[hlcm_extract$ID]
 
 hlcm_extract <- hlcm_extract[!is.na(hlcm_extract[[lc_colname]]), ]
 cat(sprintf("  Non-NA pixels: %d\n", nrow(hlcm_extract)))
@@ -1897,21 +1980,21 @@ cat(sprintf("  Non-NA pixels: %d\n", nrow(hlcm_extract)))
 names(hlcm_extract)[names(hlcm_extract) == lc_colname] <- "lc_value"
 
 lc_counts <- hlcm_extract %>%
-  group_by(S_Catchmt, S_CatNAME, lc_value) %>%
+  group_by(HYBAS_ID, S_CatNAME, lc_value) %>%
   summarise(n_pixels = n(), .groups = "drop") %>%
   left_join(lc_lookup_reclass, by = "lc_value")
 
 catch_totals <- lc_counts %>%
-  group_by(S_Catchmt, S_CatNAME) %>%
+  group_by(HYBAS_ID, S_CatNAME) %>%
   summarise(total_pixels = sum(n_pixels), .groups = "drop")
 
 lc_props <- lc_counts %>%
-  left_join(catch_totals, by = c("S_Catchmt", "S_CatNAME")) %>%
+  left_join(catch_totals, by = c("HYBAS_ID", "S_CatNAME")) %>%
   mutate(proportion = n_pixels / total_pixels)
 
 cat(sprintf("  Catchments with land cover data: %d\n", nrow(catch_totals)))
-cat("  Pixel counts per catchment:\n")
-print(catch_totals)
+cat("  Pixel counts per catchment (first 20):\n")
+print(catch_totals, n = 20)
 
 lc_freq <- lc_counts %>%
   group_by(eunis_code, eunis_desc) %>%
@@ -2029,38 +2112,122 @@ dem_path <- "outputs/catchments/dem_catchments.tif"
 writeRaster(gebco_masked, dem_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
 cat(sprintf("  DEM saved: %s\n", dem_path))
 
-dem_vals <- values(gebco_masked)[, 1]
-cat(sprintf("  DEM range: %.1f – %.1f m\n",
-            min(dem_vals, na.rm = TRUE), max(dem_vals, na.rm = TRUE)))
-cat(sprintf("  DEM cells below 0m (sea): %d / %d (%.1f%%)\n",
-            sum(dem_vals < 0, na.rm = TRUE), sum(!is.na(dem_vals)),
-            100 * sum(dem_vals < 0, na.rm = TRUE) / sum(!is.na(dem_vals))))
-cat(sprintf("  DEM quantiles (m): 5%%=%.1f, 25%%=%.1f, 50%%=%.1f, 75%%=%.1f, 95%%=%.1f\n",
-            quantile(dem_vals, 0.05, na.rm = TRUE),
-            quantile(dem_vals, 0.25, na.rm = TRUE),
-            quantile(dem_vals, 0.50, na.rm = TRUE),
-            quantile(dem_vals, 0.75, na.rm = TRUE),
-            quantile(dem_vals, 0.95, na.rm = TRUE)))
 
-filled_path <- "outputs/catchments/dem_filled.tif"
-wbt_fill_depressions(dem = dem_path, output = filled_path)
-cat(sprintf("  Filled DEM: %s\n", filled_path))
+# ---- STEP 2b (CANDIDATE): TWI DEM from Copernicus COP30 instead of GEBCO ----
+# Testing whether COP30 (~19m) gives more accurate flow direction/
+# accumulation than GEBCO (~460m) for this TERRESTRIAL flow-routing
+# pipeline specifically. GEBCO stays untouched everywhere else (marine
+# bathymetry in 03_habitats.R / 04_physical.R) — this only builds a
+# candidate replacement DEM for Step 2, saved under a distinct filename
+# so it can be compared against the GEBCO version above before anything
+# downstream (fill depressions, flow accumulation, slope, TWI...) gets
+# switched over.
+#
+# Native ~19m resolution (no downsampling). NA-masking negative/marine
+# cells was tried and reverted: wbt_fill_depressions() treats the outer
+# raster edge as a valid drainage outlet, but NOT an interior NA region —
+# so cutting out the intertidal fringe punched a hole in the middle of
+# the raster that land cells couldn't drain into, producing "interior pit
+# cells" at flow accumulation. COP30's natural low values at the coast
+# (down to ~-1.9m) ARE the drainage sink the algorithm needs — only the
+# catchment polygon mask is applied now, not an elevation-based one.
 
-sca_path <- "outputs/catchments/sca.tif"
-wbt_d_inf_flow_accumulation(input = filled_path, output = sca_path, out_type = "Specific Contributing Area")
-cat(sprintf("  Specific contributing area: %s\n", sca_path))
+cat("\n  --- Step 2b (candidate): Computing DEM from Copernicus COP30 ---\n")
 
-slope_path <- "outputs/catchments/slope.tif"
-wbt_slope(dem = filled_path, output = slope_path)
-cat(sprintf("  Slope: %s\n", slope_path))
+cop30_path <- "data/raw/physical/rasters_COP30/output_hh.tif"
+stopifnot("COP30 raster not found" = file.exists(cop30_path))
 
-twi_path <- "outputs/catchments/twi.tif"
-wbt_wetness_index(sca = sca_path, slope = slope_path, output = twi_path)
-cat(sprintf("  TWI computed: %s\n", twi_path))
+cop30_raw <- rast(cop30_path)
+cat(sprintf("  COP30 raw: %d x %d | res %.1f | CRS: %s\n",
+            ncol(cop30_raw), nrow(cop30_raw), res(cop30_raw)[1],
+            crs(cop30_raw, describe = TRUE)$name))
 
-twi_raw <- rast(twi_path)
+cefas_cop_crs <- st_transform(cefas_crop, crs(cop30_raw))
+cop30_crop <- crop(cop30_raw, ext(vect(cefas_cop_crs)))
+cat(sprintf("  COP30 cropped to catchment extent: %d x %d\n", ncol(cop30_crop), nrow(cop30_crop)))
+
+cop30_bng_catch <- project(cop30_crop, "EPSG:27700", method = "bilinear")
+cat(sprintf("  COP30 reprojected to BNG (native res): %d x %d | res %.1fm\n",
+            ncol(cop30_bng_catch), nrow(cop30_bng_catch), res(cop30_bng_catch)[1]))
+
+## Clip to LAND only (cefas_union intersected with the D&G land
+## boundary), not the full catchment polygon extent — cefas_crop reaches
+## out to each catchment's tidal outlet, so its raw extent includes a
+## large marine/estuary area where COP30 (land-only) has no data at all.
+## Left unclipped, that becomes one huge interior NA hole that
+## wbt_fill_depressions() can't drain into (confirmed by the 99.98m max
+## fill depth — it was trying to fill the entire sea void up to the
+## surrounding land rim). Clipping to land makes the coastline the
+## raster's genuine outer edge, which IS recognised as a valid outlet.
+cefas_land <- st_intersection(st_make_valid(cefas_union), st_union(las_dg_bng))
+cop30_masked <- mask(cop30_bng_catch, vect(cefas_land))
+
+cat(sprintf("  COP30 DEM range: %.1f to %.1f m\n",
+            global(cop30_masked, "min", na.rm = TRUE)[[1]],
+            global(cop30_masked, "max", na.rm = TRUE)[[1]]))
+cat(sprintf("  Non-NA cells: %d of %d (%.1f%%)\n",
+            global(!is.na(cop30_masked), "sum", na.rm = TRUE)[[1]], ncell(cop30_masked),
+            100 * global(!is.na(cop30_masked), "sum", na.rm = TRUE)[[1]] / ncell(cop30_masked)))
+
+dem_cop30_path <- "outputs/catchments/dem_catchments_cop30.tif"
+writeRaster(cop30_masked, dem_cop30_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+cat(sprintf("  Saved: %s\n", dem_cop30_path))
+
+plot(cop30_masked, main = "Candidate DEM: COP30 (native res, polygon-masked only)")
+
+
+# ---- STEP 2c (CANDIDATE): Fill depressions on COP30 DEM ----
+# First downstream step of replacing GEBCO with COP30 in this pipeline.
+# Parallel candidate output (dem_filled_cop30.tif), not overwriting the
+# existing GEBCO-based dem_filled.tif — the GEBCO diagnostic/fill-
+# depressions code right below this block is left untouched for now.
+
+cat("\n  --- Step 2c (candidate): Fill depressions on COP30 DEM ---\n")
+
+filled_path_cop30 <- "outputs/catchments/dem_filled_cop30.tif"
+wbt_fill_depressions(dem = dem_cop30_path, output = filled_path_cop30)
+cat(sprintf("  Filled DEM (COP30): %s\n", filled_path_cop30))
+
+filled_cop30 <- rast(filled_path_cop30)
+cat(sprintf("  Filled COP30 DEM range: %.1f to %.1f m\n",
+            global(filled_cop30, "min", na.rm = TRUE)[[1]],
+            global(filled_cop30, "max", na.rm = TRUE)[[1]]))
+
+plot(filled_cop30, main = "Candidate: COP30 DEM (depressions filled)")
+
+
+#dem_vals <- values(gebco_masked)[, 1]
+#cat(sprintf("  DEM range: %.1f – %.1f m\n",
+#            min(dem_vals, na.rm = TRUE), max(dem_vals, na.rm = TRUE)))
+#cat(sprintf("  DEM cells below 0m (sea): %d / %d (%.1f%%)\n",
+#            sum(dem_vals < 0, na.rm = TRUE), sum(!is.na(dem_vals)),
+#            100 * sum(dem_vals < 0, na.rm = TRUE) / sum(!is.na(dem_vals))))
+#cat(sprintf("  DEM quantiles (m): 5%%=%.1f, 25%%=%.1f, 50%%=%.1f, 75%%=%.1f, 95%%=%.1f\n",
+#            quantile(dem_vals, 0.05, na.rm = TRUE),
+#            quantile(dem_vals, 0.25, na.rm = TRUE),
+#            quantile(dem_vals, 0.50, na.rm = TRUE),
+#            quantile(dem_vals, 0.75, na.rm = TRUE),
+#            quantile(dem_vals, 0.95, na.rm = TRUE)))
+
+## filled_path_cop30 already computed in Step 2c above — reusing it
+## rather than re-running wbt_fill_depressions on the GEBCO dem_path
+
+sca_path_cop30 <- "outputs/catchments/sca_cop30.tif"
+wbt_d_inf_flow_accumulation(input = filled_path_cop30, output = sca_path_cop30,
+                            out_type = "Specific Contributing Area")
+cat(sprintf("  Specific contributing area (COP30): %s\n", sca_path_cop30))
+
+slope_path_cop30 <- "outputs/catchments/slope_cop30.tif"
+wbt_slope(dem = filled_path_cop30, output = slope_path_cop30)
+cat(sprintf("  Slope (COP30): %s\n", slope_path_cop30))
+
+twi_path_cop30 <- "outputs/catchments/twi_cop30.tif"
+wbt_wetness_index(sca = sca_path_cop30, slope = slope_path_cop30, output = twi_path_cop30)
+cat(sprintf("  TWI computed (COP30): %s\n", twi_path_cop30))
+
+twi_raw <- rast(twi_path_cop30)
 twi_vals <- values(twi_raw)[, 1]
-cat(sprintf("  TWI raw range: %.3f – %.3f\n",
+cat(sprintf("  TWI raw range (COP30): %.3f – %.3f\n",
             min(twi_vals, na.rm = TRUE), max(twi_vals, na.rm = TRUE)))
 cat(sprintf("  TWI non-NA cells: %d / %d\n",
             sum(!is.na(twi_vals)), length(twi_vals)))
@@ -2075,9 +2242,9 @@ twi_min <- min(twi_vals, na.rm = TRUE)
 twi_max <- max(twi_vals, na.rm = TRUE)
 twi_norm <- (twi_raw - twi_min) / (twi_max - twi_min)
 
-twi_norm_path <- "outputs/catchments/twi_normalised.tif"
+twi_norm_path <- "outputs/catchments/twi_normalised_cop30.tif"
 writeRaster(twi_norm, twi_norm_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
-cat(sprintf("  TWI normalised (0-1) saved: %s\n", twi_norm_path))
+cat(sprintf("  TWI normalised (0-1) saved (COP30): %s\n", twi_norm_path))
 cat(sprintf("  TWI normalised range: %.3f – %.3f\n",
             min(values(twi_norm), na.rm = TRUE),
             max(values(twi_norm), na.rm = TRUE)))
@@ -2091,6 +2258,8 @@ cat(sprintf("  TWI resampled: non-NA = %d, source_risk non-NA = %d\n",
             sum(!is.na(twi_res_vals)), sum(!is.na(src_vals))))
 cat(sprintf("  TWI coverage of source_risk cells: %.1f%%\n",
             100 * sum(!is.na(twi_res_vals) & !is.na(src_vals)) / sum(!is.na(src_vals))))
+
+plot(twi_resampled)
 
 
 # ---- STEP 3: Diffuse pollution risk ----
@@ -2196,102 +2365,264 @@ if (file.exists(erosion_path) & file.exists(leach_path) & file.exists(runoff_pat
 }
 
 
-# ---- STEP 4: Weighted flow accumulation (risk routing) ----
-# Accumulate diffuse_pollution_risk downstream through the drainage network.
-# Each cell contributes its risk value (not 1) to all downstream cells.
-# Done at GEBCO DEM resolution (~90K cells) then resampled.
+# ---- STEP 4 (DEFUNCT): Weighted flow accumulation via custom D8 on COP30 ----
+# Superseded — produced a noisy/striped accumulation pattern (D8 grid-bias
+# artifact on a minimally-conditioned DEM, worsened by elevation-tie
+# ordering on filled flats). Replaced below by routing on HydroSHEDS's
+# pre-conditioned DIR grid with a proper topological sort. Left commented
+# rather than deleted.
+#
+# cat("\n  --- Step 4: Weighted flow accumulation (COP30) ---\n")
+#
+# flow_dir_path <- "outputs/catchments/flow_dir_cop30.tif"
+# wbt_d8_pointer(dem = filled_path_cop30, output = flow_dir_path)
+# cat(sprintf("  D8 flow direction: %s\n", flow_dir_path))
+#
+# flow_dir <- rast(flow_dir_path)
+#
+# risk_at_dem <- resample(diffuse_pollution_risk, flow_dir, method = "average")
+# risk_dem_vals <- values(risk_at_dem)[, 1]
+# cat(sprintf("  Risk aggregated to DEM grid: %d x %d, non-NA = %d\n",
+#             ncol(risk_at_dem), nrow(risk_at_dem),
+#             sum(!is.na(risk_dem_vals))))
+# cat(sprintf("  Aggregated risk range: %.4f – %.4f (original: %.4f – %.4f)\n",
+#             min(risk_dem_vals, na.rm = TRUE), max(risk_dem_vals, na.rm = TRUE),
+#             min(values(diffuse_pollution_risk), na.rm = TRUE),
+#             max(values(diffuse_pollution_risk), na.rm = TRUE)))
+#
+# dem_filled <- rast(filled_path_cop30)
+# fdir_vals <- values(flow_dir)[, 1]
+# risk_vals <- values(risk_at_dem)[, 1]
+# elev_vals <- values(dem_filled)[, 1]
+#
+# cat("  D8 pointer unique values:\n")
+# print(sort(unique(na.omit(fdir_vals))))
+#
+# cat(sprintf("  Risk at DEM grid before cleanup: min=%.6f, max=%.6f, NAs=%d, negatives=%d\n",
+#             min(risk_vals, na.rm = TRUE), max(risk_vals, na.rm = TRUE),
+#             sum(is.na(risk_vals)), sum(risk_vals < 0, na.rm = TRUE)))
+#
+# risk_vals[is.na(risk_vals)] <- 0
+# risk_vals[risk_vals < 0] <- 0
+# accum_vals <- risk_vals
+#
+# nr <- nrow(flow_dir)
+# nc <- ncol(flow_dir)
+#
+# # D8 pointer encoding (WhiteboxTools): 1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW, 64=N, 128=NE
+# d8_dr <- c(`1`=0L, `2`=1L, `4`=1L, `8`=1L, `16`=0L, `32`=-1L, `64`=-1L, `128`=-1L)
+# d8_dc <- c(`1`=1L, `2`=1L, `4`=0L, `8`=-1L, `16`=-1L, `32`=-1L, `64`=0L, `128`=1L)
+#
+# valid_cells <- which(!is.na(fdir_vals) & !is.na(elev_vals))
+# cell_order <- valid_cells[order(-elev_vals[valid_cells])]
+#
+# cat(sprintf("  Routing risk through %d cells (highest to lowest)...\n", length(cell_order)))
+# t_start <- Sys.time()
+#
+# for (ci in cell_order) {
+#   dir_val <- fdir_vals[ci]
+#   dir_key <- as.character(as.integer(dir_val))
+#   if (is.na(dir_val) || !(dir_key %in% names(d8_dr))) next
+#
+#   r <- ((ci - 1) %/% nc) + 1L
+#   cc <- ((ci - 1) %% nc) + 1L
+#   r2 <- r + d8_dr[[dir_key]]
+#   c2 <- cc + d8_dc[[dir_key]]
+#
+#   if (r2 >= 1L & r2 <= nr & c2 >= 1L & c2 <= nc) {
+#     target <- (r2 - 1L) * nc + c2
+#     accum_vals[target] <- accum_vals[target] + accum_vals[ci]
+#   }
+# }
+#
+# t_elapsed <- as.numeric(difftime(Sys.time(), t_start, units = "secs"))
+# cat(sprintf("  Flow accumulation complete: %.1f seconds\n", t_elapsed))
+#
+# risk_accum <- flow_dir
+# values(risk_accum) <- accum_vals
+#
+# accum_valid <- accum_vals[valid_cells]
+# cat(sprintf("  Accumulated risk range: %.2f – %.2f\n",
+#             min(accum_valid, na.rm = TRUE), max(accum_valid, na.rm = TRUE)))
+# cat(sprintf("  Accumulated risk quantiles: 50%%=%.1f, 75%%=%.1f, 90%%=%.1f, 95%%=%.1f, 99%%=%.1f\n",
+#             quantile(accum_valid, 0.50, na.rm = TRUE),
+#             quantile(accum_valid, 0.75, na.rm = TRUE),
+#             quantile(accum_valid, 0.90, na.rm = TRUE),
+#             quantile(accum_valid, 0.95, na.rm = TRUE),
+#             quantile(accum_valid, 0.99, na.rm = TRUE)))
+# n_neg <- sum(accum_valid < 0)
+# cat(sprintf("  Cells with accum > 0: %d / %d (%.1f%%)\n",
+#             sum(accum_valid > 0), length(accum_valid),
+#             100 * sum(accum_valid > 0) / length(accum_valid)))
+# if (n_neg > 0) {
+#   cat(sprintf("  WARNING: %d cells have negative accumulated risk (min = %.2f)\n", n_neg, min(accum_valid)))
+#   cat("  This should not happen — check input risk raster for anomalies.\n")
+# }
+#
+#
+# risk_accum_path <- "outputs/catchments/risk_accumulated_cop30.tif"
+# writeRaster(risk_accum, risk_accum_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+# cat(sprintf("  Saved: %s\n", risk_accum_path))
+#
+# plot(risk_accum, main = "Candidate: Accumulated diffuse pollution risk (COP30-routed, linear scale)")
+# plot(log1p(risk_accum), main = "Candidate: Accumulated diffuse pollution risk (COP30-routed, log scale)")
+#
+# zoom_ext <- ext(295000, 315000, 570000, 585000)
+# risk_accum_zoom <- crop(risk_accum, zoom_ext)
+# plot(log1p(risk_accum_zoom), main = "Zoom: log(accumulated risk) at native resolution")
 
-cat("\n  --- Step 4: Weighted flow accumulation ---\n")
 
-flow_dir_path <- "outputs/catchments/flow_dir.tif"
-wbt_d8_pointer(dem = filled_path, output = flow_dir_path)
-cat(sprintf("  D8 flow direction: %s\n", flow_dir_path))
+# ---- STEP 4 (REVISED): Weighted flow accumulation via HydroSHEDS DIR ----
+# Routes diffuse_pollution_risk downstream using HydroSHEDS's pre-conditioned
+# flow-direction grid (stream-burned, directionally filtered, valley-molded,
+# and manually corrected at >100,000 locations — see
+# data/raw/physical/HydroSHEDS_TechDoc_v1_4.pdf secs 3.4-3.5) instead of our
+# own D8 pointer on a minimally-conditioned COP30 DEM.
+#
+# Routing runs in HydroSHEDS's native geographic (WGS84) grid — reprojecting
+# a categorical D8 pointer grid to BNG would desynchronise the direction
+# codes from the new grid's cell adjacency, since "flows east" in lat/long
+# space doesn't reliably mean "flows east" after reprojection. Only the
+# resulting continuous accumulated-risk raster is reprojected back to
+# EPSG:27700 afterward, which is safe.
+#
+# Cell processing order uses a topological sort (Kahn's algorithm) on the
+# DIR pointer graph itself, rather than elevation-descending order — this
+# guarantees every upstream contributor is summed before its cell is passed
+# downstream, with no tie-breaking ambiguity (the likely cause of the COP30
+# striping).
 
-flow_dir <- rast(flow_dir_path)
+cat("\n  --- Step 4 (revised): Weighted flow accumulation via HydroSHEDS DIR ---\n")
 
-risk_at_dem <- resample(diffuse_pollution_risk, flow_dir, method = "average")
-risk_dem_vals <- values(risk_at_dem)[, 1]
-cat(sprintf("  Risk aggregated to DEM grid: %d x %d, non-NA = %d\n",
-            ncol(risk_at_dem), nrow(risk_at_dem),
-            sum(!is.na(risk_dem_vals))))
-cat(sprintf("  Aggregated risk range: %.4f – %.4f (original: %.4f – %.4f)\n",
-            min(risk_dem_vals, na.rm = TRUE), max(risk_dem_vals, na.rm = TRUE),
+hydrosheds_dir_path <- "data/raw/physical/eu_dir_3s/eu_dir_3s.tif"
+dir_raw <- rast(hydrosheds_dir_path)
+cat(sprintf("  HydroSHEDS DIR loaded: %s | res %.6f deg\n",
+            hydrosheds_dir_path, res(dir_raw)[1]))
+
+# Crop to study area (buffered) — buffer by 2km in the native projected CRS
+# (metres) before transforming to WGS84, since st_buffer() on a geographic
+# CRS uses spherical (s2) geometry where the distance is interpreted in
+# metres, not degrees — buffering after transforming would add ~2cm, not 2km.
+cefas_land_buf_wgs <- st_transform(st_buffer(cefas_land, 2000), crs(dir_raw))
+dir_crop <- crop(dir_raw, ext(vect(cefas_land_buf_wgs)))
+cat(sprintf("  DIR cropped to study area: %d x %d\n", ncol(dir_crop), nrow(dir_crop)))
+
+# Reproject diffuse_pollution_risk INTO the DIR grid (not the other way
+# round) — a continuous risk surface reprojects/aggregates safely, unlike
+# the categorical direction codes.
+risk_on_dir <- terra::project(diffuse_pollution_risk, dir_crop, method = "average")
+risk_vals <- values(risk_on_dir)[, 1]
+cat(sprintf("  Risk reprojected onto DIR grid: %d x %d, non-NA = %d\n",
+            ncol(risk_on_dir), nrow(risk_on_dir), sum(!is.na(risk_vals))))
+cat(sprintf("  Reprojected risk range: %.4f – %.4f (original: %.4f – %.4f)\n",
+            min(risk_vals, na.rm = TRUE), max(risk_vals, na.rm = TRUE),
             min(values(diffuse_pollution_risk), na.rm = TRUE),
             max(values(diffuse_pollution_risk), na.rm = TRUE)))
 
-dem_filled <- rast(filled_path)
-fdir_vals <- values(flow_dir)[, 1]
-risk_vals <- values(risk_at_dem)[, 1]
-elev_vals <- values(dem_filled)[, 1]
+fdir_vals <- values(dir_crop)[, 1]
+nr <- nrow(dir_crop)
+nc <- ncol(dir_crop)
+ncell_dir <- ncell(dir_crop)
 
-cat("  D8 pointer unique values:\n")
+cat("  DIR unique values:\n")
 print(sort(unique(na.omit(fdir_vals))))
-
-cat(sprintf("  Risk at DEM grid before cleanup: min=%.6f, max=%.6f, NAs=%d, negatives=%d\n",
-            min(risk_vals, na.rm = TRUE), max(risk_vals, na.rm = TRUE),
-            sum(is.na(risk_vals)), sum(risk_vals < 0, na.rm = TRUE)))
 
 risk_vals[is.na(risk_vals)] <- 0
 risk_vals[risk_vals < 0] <- 0
 accum_vals <- risk_vals
 
-nr <- nrow(flow_dir)
-nc <- ncol(flow_dir)
-
-# D8 pointer encoding (WhiteboxTools): 1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW, 64=N, 128=NE
+# D8 pointer encoding (ESRI convention, same as HydroSHEDS DIR):
+# 1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW, 64=N, 128=NE. Values outside this set
+# (0 = ocean/inland sink outlet, or legacy -1) are terminal: no outgoing edge.
 d8_dr <- c(`1`=0L, `2`=1L, `4`=1L, `8`=1L, `16`=0L, `32`=-1L, `64`=-1L, `128`=-1L)
 d8_dc <- c(`1`=1L, `2`=1L, `4`=0L, `8`=-1L, `16`=-1L, `32`=-1L, `64`=0L, `128`=1L)
 
-valid_cells <- which(!is.na(fdir_vals) & !is.na(elev_vals))
-cell_order <- valid_cells[order(-elev_vals[valid_cells])]
+valid_cells <- which(!is.na(fdir_vals))
+r_all <- ((valid_cells - 1L) %/% nc) + 1L
+c_all <- ((valid_cells - 1L) %% nc) + 1L
+dir_key <- as.character(as.integer(fdir_vals[valid_cells]))
+has_dir <- dir_key %in% names(d8_dr)
 
-cat(sprintf("  Routing risk through %d cells (highest to lowest)...\n", length(cell_order)))
+target_idx <- rep(NA_integer_, ncell_dir)
+r2 <- r_all
+c2 <- c_all
+r2[has_dir] <- r_all[has_dir] + d8_dr[dir_key[has_dir]]
+c2[has_dir] <- c_all[has_dir] + d8_dc[dir_key[has_dir]]
+in_bounds <- has_dir & r2 >= 1L & r2 <= nr & c2 >= 1L & c2 <= nc
+tgt <- rep(NA_integer_, length(valid_cells))
+tgt[in_bounds] <- (r2[in_bounds] - 1L) * nc + c2[in_bounds]
+target_idx[valid_cells] <- tgt
+
+cat(sprintf("  Valid cells: %d | terminal/outlet cells: %d\n",
+            length(valid_cells), sum(!has_dir)))
+
+in_degree <- tabulate(target_idx[!is.na(target_idx)], nbins = ncell_dir)
+
+# Topological sort (Kahn's algorithm): start from cells with no upstream
+# contributor (in-degree 0, i.e. headwaters), propagate to their target,
+# and only enqueue the target once ALL of its contributors have been summed.
+n_valid <- length(valid_cells)
+queue <- integer(n_valid)
+head_i <- 1L
+zero_indeg <- valid_cells[in_degree[valid_cells] == 0L]
+tail_i <- length(zero_indeg)
+queue[seq_len(tail_i)] <- zero_indeg
+
+cat(sprintf("  Routing risk through %d cells (topological order)...\n", n_valid))
 t_start <- Sys.time()
 
-for (ci in cell_order) {
-  dir_val <- fdir_vals[ci]
-  dir_key <- as.character(as.integer(dir_val))
-  if (is.na(dir_val) || !(dir_key %in% names(d8_dr))) next
-
-  r <- ((ci - 1) %/% nc) + 1L
-  cc <- ((ci - 1) %% nc) + 1L
-  r2 <- r + d8_dr[[dir_key]]
-  c2 <- cc + d8_dc[[dir_key]]
-
-  if (r2 >= 1L & r2 <= nr & c2 >= 1L & c2 <= nc) {
-    target <- (r2 - 1L) * nc + c2
-    accum_vals[target] <- accum_vals[target] + accum_vals[ci]
+while (head_i <= tail_i) {
+  ci <- queue[head_i]
+  head_i <- head_i + 1L
+  tgt_ci <- target_idx[ci]
+  if (!is.na(tgt_ci)) {
+    accum_vals[tgt_ci] <- accum_vals[tgt_ci] + accum_vals[ci]
+    in_degree[tgt_ci] <- in_degree[tgt_ci] - 1L
+    if (in_degree[tgt_ci] == 0L) {
+      tail_i <- tail_i + 1L
+      queue[tail_i] <- tgt_ci
+    }
   }
 }
 
 t_elapsed <- as.numeric(difftime(Sys.time(), t_start, units = "secs"))
 cat(sprintf("  Flow accumulation complete: %.1f seconds\n", t_elapsed))
 
-risk_accum <- flow_dir
-values(risk_accum) <- accum_vals
+n_unresolved <- sum(in_degree[valid_cells] > 0L)
+if (n_unresolved > 0) {
+  cat(sprintf("  WARNING: %d cells never resolved (possible cycle in DIR data)\n", n_unresolved))
+}
+
+risk_accum_dir <- dir_crop
+values(risk_accum_dir) <- accum_vals
 
 accum_valid <- accum_vals[valid_cells]
 cat(sprintf("  Accumulated risk range: %.2f – %.2f\n",
             min(accum_valid, na.rm = TRUE), max(accum_valid, na.rm = TRUE)))
-cat(sprintf("  Accumulated risk quantiles: 50%%=%.1f, 75%%=%.1f, 90%%=%.1f, 95%%=%.1f, 99%%=%.1f\n",
+cat(sprintf("  Accumulated risk quantiles: 50%%=%.2f, 75%%=%.2f, 90%%=%.2f, 95%%=%.2f, 99%%=%.2f\n",
             quantile(accum_valid, 0.50, na.rm = TRUE),
             quantile(accum_valid, 0.75, na.rm = TRUE),
             quantile(accum_valid, 0.90, na.rm = TRUE),
             quantile(accum_valid, 0.95, na.rm = TRUE),
             quantile(accum_valid, 0.99, na.rm = TRUE)))
-n_neg <- sum(accum_valid < 0)
 cat(sprintf("  Cells with accum > 0: %d / %d (%.1f%%)\n",
             sum(accum_valid > 0), length(accum_valid),
             100 * sum(accum_valid > 0) / length(accum_valid)))
-if (n_neg > 0) {
-  cat(sprintf("  WARNING: %d cells have negative accumulated risk (min = %.2f)\n", n_neg, min(accum_valid)))
-  cat("  This should not happen — check input risk raster for anomalies.\n")
-}
 
+# Reproject the CONTINUOUS accumulated-risk result back to BNG — river
+# segments, HydroBASINS catchments, etc. are all in EPSG:27700.
+risk_accum <- terra::project(risk_accum_dir, "EPSG:27700", method = "bilinear")
 
-risk_accum_path <- "outputs/catchments/risk_accumulated.tif"
+risk_accum_path <- "outputs/catchments/risk_accumulated_hydrosheds.tif"
 writeRaster(risk_accum, risk_accum_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
 cat(sprintf("  Saved: %s\n", risk_accum_path))
+
+plot(risk_accum, main = "Accumulated diffuse pollution risk (HydroSHEDS DIR-routed, linear scale)")
+plot(log1p(risk_accum), main = "Accumulated diffuse pollution risk (HydroSHEDS DIR-routed, log scale)")
+
+zoom_ext <- ext(295000, 315000, 570000, 585000)
+risk_accum_zoom <- crop(risk_accum, zoom_ext)
+plot(log1p(risk_accum_zoom), main = "Zoom: log(accumulated risk) — HydroSHEDS routing")
 
 
 # ---- STEP 4b: River accumulated risk (SCIMAP raster extraction) ----
@@ -2325,76 +2656,226 @@ risk_at_last[is.na(risk_at_last)]   <- 0
 rivers_in_catch$accum_risk_raw <- pmax(risk_at_first, risk_at_last)
 riv_min <- min(rivers_in_catch$accum_risk_raw, na.rm = TRUE)
 riv_max <- max(rivers_in_catch$accum_risk_raw, na.rm = TRUE)
-rivers_in_catch$accum_risk <- if (riv_max > riv_min) {
-  (rivers_in_catch$accum_risk_raw - riv_min) / (riv_max - riv_min)
+cat(sprintf("  Accumulated risk (raw): %.4f – %.2f\n", riv_min, riv_max))
+
+# accum_risk_raw kept as-is for ranking (Step 5) and absolute-magnitude
+# reporting — rank order is unaffected by log transform, and raw totals
+# matter when comparing how much risk a pour point actually carries.
+#
+# accum_risk (0-1) is normalized from log1p(accum_risk_raw) rather than the
+# raw value: accumulated risk is an extensive quantity (sums with upstream
+# catchment area, like flow accumulation itself), so min-max normalizing the
+# raw value squashes ~95% of segments into a barely-distinguishable
+# near-zero band and only the handful of trunk channels register. Since this
+# field is meant to sit on a comparable 0-1 footing with other normalized
+# layers for any future additive combination, log-transforming first spreads
+# moderate-risk tributaries across the range instead of flattening them to 0.
+rivers_in_catch$accum_risk_log <- log1p(rivers_in_catch$accum_risk_raw)
+riv_log_min <- min(rivers_in_catch$accum_risk_log, na.rm = TRUE)
+riv_log_max <- max(rivers_in_catch$accum_risk_log, na.rm = TRUE)
+rivers_in_catch$accum_risk <- if (riv_log_max > riv_log_min) {
+  (rivers_in_catch$accum_risk_log - riv_log_min) / (riv_log_max - riv_log_min)
 } else {
   rep(0, n_seg)
 }
-cat(sprintf("  Accumulated risk (raw): %.4f – %.2f\n", riv_min, riv_max))
 riv_accum <- rivers_in_catch$accum_risk
-cat(sprintf("  River accum risk quantiles: 25%%=%.3f, 50%%=%.3f, 75%%=%.3f, 95%%=%.3f, max=%.3f\n",
+cat(sprintf("  River accum risk (log-normalized 0-1) quantiles: 25%%=%.3f, 50%%=%.3f, 75%%=%.3f, 95%%=%.3f, max=%.3f\n",
             quantile(riv_accum, 0.25), quantile(riv_accum, 0.50),
             quantile(riv_accum, 0.75), quantile(riv_accum, 0.95),
             max(riv_accum)))
 
-st_write(rivers_in_catch, "outputs/catchments/rivers_with_accumulated_risk.gpkg",
+st_write(rivers_in_catch, "outputs/catchments/rivers_with_accumulated_risk_hydrosheds.gpkg",
          delete_dsn = TRUE, quiet = TRUE)
-cat("  Saved: outputs/catchments/rivers_with_accumulated_risk.gpkg\n")
+cat("  Saved: outputs/catchments/rivers_with_accumulated_risk_hydrosheds.gpkg\n")
+
+# --- Plot: river accumulated risk ---
+# Sort ascending before plotting so high-risk (bright, thick) segments draw
+# on top of low-risk ones instead of being hidden underneath.
+rivers_plot_order <- rivers_in_catch[order(rivers_in_catch$accum_risk), ]
+catch_bbox <- st_bbox(catch_u)
+
+p_river_accum_risk <- ggplot() +
+  geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey60", linewidth = 0.3) +
+  geom_sf(data = rivers_plot_order, aes(colour = accum_risk_raw, linewidth = accum_risk_raw)) +
+  scale_colour_viridis_c(name = "Accumulated risk\n(raw, log scale)", option = "inferno",
+                          trans = "log1p", labels = scales::label_number(accuracy = 1)) +
+  scale_linewidth_continuous(name = "Accumulated risk\n(raw, log scale)", range = c(0.2, 1.8),
+                              trans = "log1p", labels = scales::label_number(accuracy = 1)) +
+  coord_sf(xlim = catch_bbox[c("xmin", "xmax")], ylim = catch_bbox[c("ymin", "ymax")]) +
+  labs(title = "River Accumulated Diffuse Pollution Risk",
+       subtitle = "HydroSHEDS-routed risk sampled at OS OpenRivers segment endpoints (log scale)") +
+  theme_minimal()
+
+print(p_river_accum_risk)
+
+ggsave("outputs/catchments/river_accumulated_risk.png", p_river_accum_risk,
+       width = 10, height = 8, dpi = 300)
+cat("  Saved plot: outputs/catchments/river_accumulated_risk.png\n")
 
 
-# ---- STEP 5: Coastal pour points (geometry-based) ----
-# For each named river: most seaward endpoint = pour point.
-# Coast reference = SMR boundary (Mean High Water Springs), which wraps
-# around estuary mouths so tidal rivers like the Urr/Nith are captured.
+# ---- STEP 5 (DEFUNCT): Coastal pour points via nearest-endpoint heuristic ----
+# Superseded — scored river-segment endpoints by distance to the SMR
+# *polygon*, which is 0 anywhere inside it. A segment whose OS line runs
+# out across intertidal flats therefore scored as "at the coast" wherever
+# its vector happened to stop, potentially well seaward of the true
+# high-water line, rather than at the actual crossing point. Replaced below
+# by a boundary-intersection approach. Left commented rather than deleted.
+#
+# cat("\n----- Step 5: Coastal pour points (geometry-based) -----\n")
+#
+# coast_thresh <- 100  # metres
+#
+# # All segment endpoints
+# ep_first <- t(sapply(seq_len(n_seg), function(i) {
+#   cc <- st_coordinates(rivers_in_catch$geometry[i])
+#   cc[1, 1:2]
+# }))
+# ep_last <- t(sapply(seq_len(n_seg), function(i) {
+#   cc <- st_coordinates(rivers_in_catch$geometry[i])
+#   cc[nrow(cc), 1:2]
+# }))
+#
+# all_eps <- rbind(
+#   data.frame(x = ep_first[, 1], y = ep_first[, 2], seg_idx = seq_len(n_seg)),
+#   data.frame(x = ep_last[, 1],  y = ep_last[, 2],  seg_idx = seq_len(n_seg))
+# )
+# all_eps$watercourse_name <- rivers_in_catch$watercourse_name[all_eps$seg_idx]
+# all_eps$accum_risk_raw   <- rivers_in_catch$accum_risk_raw[all_eps$seg_idx]
+# all_eps_sf <- st_as_sf(all_eps, coords = c("x", "y"), crs = 27700)
+#
+# # Distance to SMR polygon (0 if inside the marine area, positive on land)
+# all_eps_sf$coast_dist <- as.numeric(st_distance(all_eps_sf, smr_solway_bng))
+# cat(sprintf("  Total endpoints: %d, within %dm of coast: %d\n",
+#             nrow(all_eps_sf), coast_thresh,
+#             sum(all_eps_sf$coast_dist <= coast_thresh)))
+#
+# # Named rivers: most seaward endpoint per watercourse name
+# named_eps <- all_eps_sf[which(!is.na(all_eps_sf$watercourse_name) &
+#                               all_eps_sf$coast_dist <= coast_thresh), ]
+# pour_named <- named_eps %>%
+#   group_by(watercourse_name) %>%
+#   slice_min(coast_dist, n = 1, with_ties = FALSE) %>%
+#   ungroup()
+#
+# # Unnamed segments: endpoints within threshold of coast
+# unnamed_eps <- all_eps_sf[which(is.na(all_eps_sf$watercourse_name) &
+#                                 all_eps_sf$coast_dist <= coast_thresh), ]
+#
+# pour_points <- rbind(pour_named, unnamed_eps)
+# in_aoi <- st_intersects(pour_points, scamp_aoi_sf, sparse = FALSE)[, 1]
+# pour_points <- pour_points[which(in_aoi), ]
+#
+# # Join to catchments
+# pour_points <- st_join(pour_points, cefas_crop[, c("S_Catchmt", "S_CatNAME")],
+#                        join = st_nearest_feature)
+# pour_points <- pour_points[which(!is.na(pour_points$S_Catchmt)), ]
+#
+# pp_min <- min(pour_points$accum_risk_raw, na.rm = TRUE)
+# pp_max <- max(pour_points$accum_risk_raw, na.rm = TRUE)
+# pour_points$accum_risk <- if (pp_max > pp_min) {
+#   (pour_points$accum_risk_raw - pp_min) / (pp_max - pp_min)
+# } else {
+#   rep(0, nrow(pour_points))
+# }
+#
+# cat(sprintf("  Pour points: %d (%d named, %d unnamed)\n",
+#             nrow(pour_points), sum(!is.na(pour_points$watercourse_name)),
+#             sum(is.na(pour_points$watercourse_name))))
+# cat(sprintf("  Accum risk (raw): %.4f – %.2f\n", pp_min, pp_max))
+# cat("  Named pour points (top 15 by risk):\n")
+# pp_show <- st_drop_geometry(pour_points[order(-pour_points$accum_risk_raw), ])
+# print(head(pp_show[which(!is.na(pp_show$watercourse_name)),
+#                    c("watercourse_name", "S_CatNAME", "accum_risk")], 15))
+#
+# smr_coast <- st_cast(st_boundary(smr_solway_bng), "MULTILINESTRING")
+# m_pp <- mapview(cefas_crop, col.regions = "grey90", alpha.regions = 0.3,
+#                 layer.name = "Catchments") +
+#   mapview(smr_coast, color = "red", lwd = 2, layer.name = "SMR boundary (MHWS)") +
+#   mapview(scamp_coastline, color = "orange", lwd = 1.5,
+#           layer.name = "Current coastline (D&G admin)") +
+#   mapview(rivers_in_catch, color = "steelblue", lwd = 0.5,
+#           label = "watercourse_name", layer.name = "Rivers") +
+#   mapview(pour_points, zcol = "accum_risk", cex = 5,
+#           label = "watercourse_name", layer.name = "Pour points")
+# print(m_pp)
+#
+# st_write(pour_points, "outputs/catchments/coastal_pour_points_raw.gpkg",
+#          delete_dsn = TRUE, quiet = TRUE)
+#
+# pp_dist <- st_distance(pour_points)
+# cluster_thresh <- 500  # metres
+# pp_clust <- cutree(hclust(as.dist(pp_dist), method = "single"), h = cluster_thresh)
+# pour_points$cluster <- pp_clust
+#
+# pour_points <- pour_points %>%
+#   group_by(cluster) %>%
+#   slice_max(accum_risk_raw, n = 1, with_ties = FALSE) %>%
+#   ungroup() %>%
+#   select(-cluster)
+#
+# all_river_eps <- rbind(
+#   data.frame(x = ep_first[, 1], y = ep_first[, 2]),
+#   data.frame(x = ep_last[, 1],  y = ep_last[, 2])
+# )
+# all_river_eps_sf <- st_as_sf(all_river_eps, coords = c("x", "y"), crs = 27700)
+#
+# nearest_idx <- st_nearest_feature(pour_points, all_river_eps_sf)
+# snap_dist <- as.numeric(st_distance(pour_points, all_river_eps_sf[nearest_idx, ],
+#                                      by_element = TRUE))
+# st_geometry(pour_points) <- st_geometry(all_river_eps_sf[nearest_idx, ])
+#
+# st_write(pour_points, "outputs/catchments/coastal_pour_points.gpkg",
+#          delete_dsn = TRUE, quiet = TRUE)
 
-cat("\n----- Step 5: Coastal pour points (geometry-based) -----\n")
 
-coast_thresh <- 100  # metres
+# ---- STEP 5 (REVISED): Coastal pour points (boundary intersection) ----
+# Two-step fix for the overshoot problem above: (1) buffer the SMR boundary
+# LINE to screen candidate coastal segments — cheap, approximate, just for
+# scoping which segments are worth testing — then (2) intersect those
+# candidates against the UNBUFFERED boundary line to find the actual
+# point(s) where each river geometrically crosses the mean-high-water-
+# springs line. No snapping afterward: the intersection point IS the
+# correct location, so moving it to a nearby OS vector node would
+# reintroduce the same imprecision this fixes.
 
-# All segment endpoints
-ep_first <- t(sapply(seq_len(n_seg), function(i) {
-  cc <- st_coordinates(rivers_in_catch$geometry[i])
-  cc[1, 1:2]
-}))
-ep_last <- t(sapply(seq_len(n_seg), function(i) {
-  cc <- st_coordinates(rivers_in_catch$geometry[i])
-  cc[nrow(cc), 1:2]
-}))
+cat("\n----- Step 5 (revised): Coastal pour points (boundary intersection) -----\n")
 
-all_eps <- rbind(
-  data.frame(x = ep_first[, 1], y = ep_first[, 2], seg_idx = seq_len(n_seg)),
-  data.frame(x = ep_last[, 1],  y = ep_last[, 2],  seg_idx = seq_len(n_seg))
-)
-all_eps$watercourse_name <- rivers_in_catch$watercourse_name[all_eps$seg_idx]
-all_eps$accum_risk_raw   <- rivers_in_catch$accum_risk_raw[all_eps$seg_idx]
-all_eps_sf <- st_as_sf(all_eps, coords = c("x", "y"), crs = 27700)
+coast_thresh <- 100  # metres — buffer used only to screen candidate segments
 
-# Distance to SMR polygon (0 if inside the marine area, positive on land)
-all_eps_sf$coast_dist <- as.numeric(st_distance(all_eps_sf, smr_solway_bng))
-cat(sprintf("  Total endpoints: %d, within %dm of coast: %d\n",
-            nrow(all_eps_sf), coast_thresh,
-            sum(all_eps_sf$coast_dist <= coast_thresh)))
+smr_coast <- st_cast(st_boundary(smr_solway_bng), "MULTILINESTRING")
+coast_buffer <- st_buffer(smr_coast, coast_thresh)
 
-# Named rivers: most seaward endpoint per watercourse name
-named_eps <- all_eps_sf[which(!is.na(all_eps_sf$watercourse_name) &
-                              all_eps_sf$coast_dist <= coast_thresh), ]
-pour_named <- named_eps %>%
-  group_by(watercourse_name) %>%
-  slice_min(coast_dist, n = 1, with_ties = FALSE) %>%
-  ungroup()
+candidate_idx <- lengths(st_intersects(rivers_in_catch, coast_buffer)) > 0
+rivers_candidates <- rivers_in_catch[candidate_idx, ]
+cat(sprintf("  Candidate coastal segments (within %dm of MHWS line): %d / %d\n",
+            coast_thresh, nrow(rivers_candidates), n_seg))
 
-# Unnamed segments: endpoints within threshold of coast
-unnamed_eps <- all_eps_sf[which(is.na(all_eps_sf$watercourse_name) &
-                                all_eps_sf$coast_dist <= coast_thresh), ]
+crossings <- suppressWarnings(st_intersection(
+  rivers_candidates[, c("watercourse_name", "accum_risk_raw")], smr_coast))
+crossings <- crossings[st_geometry_type(crossings) %in% c("POINT", "MULTIPOINT"), ]
+crossings <- st_cast(crossings, "POINT", warn = FALSE)
 
-pour_points <- rbind(pour_named, unnamed_eps)
+n_candidates_named <- length(unique(na.omit(rivers_candidates$watercourse_name)))
+n_crossed_named <- length(unique(na.omit(crossings$watercourse_name)))
+cat(sprintf("  Named rivers with a true boundary crossing: %d / %d candidates\n",
+            n_crossed_named, n_candidates_named))
+cat(sprintf("  Total crossing points found: %d (named + unnamed)\n", nrow(crossings)))
+
+# Named and unnamed crossings are treated identically here — no grouping by
+# watercourse_name, since that would rely on OS naming being complete and
+# consistent (it isn't always) to decide what counts as "the same" outlet.
+# Multiple crossings of the same physical outlet (a sinuous coastline
+# crossing one river's line more than once) are instead collapsed by actual
+# geometric proximity in the 500m spatial dedup step below, which applies
+# uniformly regardless of whether a crossing has a name. watercourse_name is
+# kept only as a descriptive attribute on whichever point survives dedup.
+pour_points <- crossings
 in_aoi <- st_intersects(pour_points, scamp_aoi_sf, sparse = FALSE)[, 1]
 pour_points <- pour_points[which(in_aoi), ]
 
-# Join to catchments
-pour_points <- st_join(pour_points, cefas_crop[, c("S_Catchmt", "S_CatNAME")],
+pour_points <- st_join(pour_points, hybas_lv12_dg[, c("HYBAS_ID", "S_CatNAME")],
                        join = st_nearest_feature)
-pour_points <- pour_points[which(!is.na(pour_points$S_Catchmt)), ]
+pour_points <- pour_points[which(!is.na(pour_points$HYBAS_ID)), ]
 
 pp_min <- min(pour_points$accum_risk_raw, na.rm = TRUE)
 pp_max <- max(pour_points$accum_risk_raw, na.rm = TRUE)
@@ -2411,31 +2892,31 @@ cat(sprintf("  Accum risk (raw): %.4f – %.2f\n", pp_min, pp_max))
 cat("  Named pour points (top 15 by risk):\n")
 pp_show <- st_drop_geometry(pour_points[order(-pour_points$accum_risk_raw), ])
 print(head(pp_show[which(!is.na(pp_show$watercourse_name)),
-                   c("watercourse_name", "S_CatNAME", "accum_risk")], 15))
-
-# --- Mapview: check pour point locations before proceeding ---
-smr_coast <- st_cast(st_boundary(smr_solway_bng), "MULTILINESTRING")
-m_pp <- mapview(cefas_crop, col.regions = "grey90", alpha.regions = 0.3,
-                layer.name = "Catchments") +
-  mapview(smr_coast, color = "red", lwd = 2, layer.name = "SMR boundary (MHWS)") +
-  mapview(scamp_coastline, color = "orange", lwd = 1.5,
-          layer.name = "Current coastline (D&G admin)") +
-  mapview(rivers_in_catch, color = "steelblue", lwd = 0.5,
-          label = "watercourse_name", layer.name = "Rivers") +
-  mapview(pour_points, zcol = "accum_risk", cex = 5,
-          label = "watercourse_name", layer.name = "Pour points")
-print(m_pp)
+                   c("watercourse_name", "S_CatNAME", "accum_risk_raw", "accum_risk")], 15))
 
 st_write(pour_points, "outputs/catchments/coastal_pour_points_raw.gpkg",
          delete_dsn = TRUE, quiet = TRUE)
 cat("  Saved: outputs/catchments/coastal_pour_points_raw.gpkg\n")
 
-# --- Spatial deduplication: cluster points within 500m, keep highest risk ---
-cat("\n  --- Pour point deduplication (500m clusters) ---\n")
+# --- Mapview: pre-dedup check (zoomable) — includes river geometries so
+# multiple crossings from the same sinuous coastline / river mouth are
+# visible before they get collapsed by the 500m clustering below ---
+m_pp_predup <- mapview(hybas_lv12_dg, col.regions = "grey90", alpha.regions = 0.3,
+                       layer.name = "Catchments (HydroBASINS lvl 12)") +
+  mapview(smr_coast, color = "red", lwd = 2, layer.name = "SMR boundary (MHWS)") +
+  mapview(rivers_in_catch, color = "steelblue", lwd = 0.5,
+          label = "watercourse_name", layer.name = "Rivers") +
+  mapview(pour_points, zcol = "accum_risk", cex = 6,
+          label = "watercourse_name", layer.name = "Pour points (pre-dedup)")
+print(m_pp_predup)
+
+# --- Spatial deduplication: cluster points within 150m, keep highest risk ---
+# (handles sinuous-coastline segments that cross the boundary more than once)
+cat("\n  --- Pour point deduplication (150m clusters) ---\n")
 cat(sprintf("  Before dedup: %d pour points\n", nrow(pour_points)))
 
 pp_dist <- st_distance(pour_points)
-cluster_thresh <- 500  # metres
+cluster_thresh <- 150  # metres
 pp_clust <- cutree(hclust(as.dist(pp_dist), method = "single"), h = cluster_thresh)
 pour_points$cluster <- pp_clust
 
@@ -2447,80 +2928,141 @@ pour_points <- pour_points %>%
 
 cat(sprintf("  After dedup: %d pour points\n", nrow(pour_points)))
 
-# --- Snap pour points to nearest river endpoint (geometry only, keep risk) ---
-all_river_eps <- rbind(
-  data.frame(x = ep_first[, 1], y = ep_first[, 2]),
-  data.frame(x = ep_last[, 1],  y = ep_last[, 2])
-)
-all_river_eps_sf <- st_as_sf(all_river_eps, coords = c("x", "y"), crs = 27700)
-
-nearest_idx <- st_nearest_feature(pour_points, all_river_eps_sf)
-snap_dist <- as.numeric(st_distance(pour_points, all_river_eps_sf[nearest_idx, ],
-                                     by_element = TRUE))
-st_geometry(pour_points) <- st_geometry(all_river_eps_sf[nearest_idx, ])
-cat(sprintf("  Snapped to nearest river endpoint (mean %.0fm, max %.0fm)\n",
-            mean(snap_dist), max(snap_dist)))
-
-m_pp2 <- mapview(cefas_crop, col.regions = "grey90", alpha.regions = 0.3,
-                 layer.name = "Catchments") +
-  mapview(smr_coast, color = "red", lwd = 2, layer.name = "SMR boundary (MHWS)") +
-  mapview(rivers_in_catch, color = "steelblue", lwd = 0.5,
-          label = "watercourse_name", layer.name = "Rivers") +
-  mapview(pour_points, zcol = "accum_risk", cex = 5,
-          label = "watercourse_name", layer.name = "Pour points (snapped)")
-print(m_pp2)
-
 st_write(pour_points, "outputs/catchments/coastal_pour_points.gpkg",
          delete_dsn = TRUE, quiet = TRUE)
 cat("  Saved: outputs/catchments/coastal_pour_points.gpkg\n")
 
+# --- Mapview: interactive check (zoomable) ---
+m_pp <- mapview(hybas_lv12_dg, col.regions = "grey90", alpha.regions = 0.3,
+                layer.name = "Catchments (HydroBASINS lvl 12)") +
+  mapview(smr_coast, color = "red", lwd = 2, layer.name = "SMR boundary (MHWS)") +
+  mapview(scamp_coastline, color = "orange", lwd = 1.5,
+          layer.name = "Current coastline (D&G admin)") +
+  mapview(rivers_in_catch, color = "steelblue", lwd = 0.5,
+          label = "watercourse_name", layer.name = "Rivers") +
+  mapview(pour_points, zcol = "accum_risk", cex = 6,
+          label = "watercourse_name", layer.name = "Pour points (boundary crossings)")
+print(m_pp)
 
-# ---- STEP 6: Per-catchment risk summaries ----
 
-cat("\n  --- Step 6: Per-catchment risk summaries ---\n")
+# ---- STEP 6 (DEFUNCT): Per-CEFAS-catchment risk summaries ----
+# Superseded — catchment unit switched to HydroBASINS lvl 12. Left
+# commented rather than deleted.
+#
+# cell_area <- cellSize(diffuse_pollution_risk, unit = "ha")
+#
+# ex_risk <- terra::extract(diffuse_pollution_risk, vect(cefas_crop), cells = TRUE)
+# ex_area <- terra::extract(cell_area, vect(cefas_crop), cells = TRUE)
+# names(ex_risk)[2] <- "risk"
+# names(ex_area)[2] <- "area_ha"
+# ex_risk$area_ha <- ex_area$area_ha
+# ex_risk$S_Catchmt <- cefas_crop$S_Catchmt[ex_risk$ID]
+#
+# catch_risk <- ex_risk %>%
+#   group_by(S_Catchmt) %>%
+#   summarise(
+#     mean_diffuse_risk = round(weighted.mean(risk, area_ha, na.rm = TRUE), 4),
+#     total_ha = round(sum(area_ha, na.rm = TRUE), 1),
+#     .groups = "drop"
+#   )
+#
+# ex_source <- terra::extract(source_risk, vect(cefas_crop), cells = TRUE)
+# ex_src_area <- terra::extract(cell_area, vect(cefas_crop), cells = TRUE)
+# names(ex_source)[2] <- "src_risk"
+# names(ex_src_area)[2] <- "area_ha"
+# ex_source$area_ha <- ex_src_area$area_ha
+# ex_source$S_Catchmt <- cefas_crop$S_Catchmt[ex_source$ID]
+#
+# catch_source <- ex_source %>%
+#   group_by(S_Catchmt) %>%
+#   summarise(
+#     mean_source_risk = round(weighted.mean(src_risk, area_ha, na.rm = TRUE), 4),
+#     .groups = "drop"
+#   )
+#
+# pour_max <- pour_points %>%
+#   st_drop_geometry() %>%
+#   group_by(S_Catchmt) %>%
+#   summarise(max_pour_accum = max(accum_risk, na.rm = TRUE), .groups = "drop")
+# pour_max$max_pour_accum[is.infinite(pour_max$max_pour_accum)] <- NA
+#
+# catch_risk <- catch_risk %>%
+#   left_join(catch_source, by = "S_Catchmt") %>%
+#   left_join(pour_max, by = "S_Catchmt") %>%
+#   left_join(st_drop_geometry(cefas_crop[, c("S_Catchmt", "S_CatNAME")]),
+#             by = "S_Catchmt") %>%
+#   arrange(desc(mean_diffuse_risk))
+#
+# cefas_risk <- merge(cefas_crop, catch_risk, by = c("S_Catchmt", "S_CatNAME"), all.x = TRUE)
+#
+# catch_composition <- lc_props %>%
+#   group_by(S_Catchmt, S_CatNAME) %>%
+#   summarise(
+#     n_classes = n_distinct(eunis_code),
+#     total_pixels = sum(n_pixels),
+#     dominant_class = eunis_code[which.max(proportion)],
+#     dominant_desc  = eunis_desc[which.max(proportion)],
+#     dominant_pct   = round(100 * max(proportion), 1),
+#     .groups = "drop"
+#   ) %>%
+#   arrange(S_CatNAME)
+
+
+# ---- STEP 6 (REVISED): Per-HydroBASINS-catchment risk summaries ----
+
+cat("\n  --- Step 6 (revised): Per-HydroBASINS-catchment risk summaries ---\n")
 
 cell_area <- cellSize(diffuse_pollution_risk, unit = "ha")
 
-ex_risk <- terra::extract(diffuse_pollution_risk, vect(cefas_crop), cells = TRUE)
-ex_area <- terra::extract(cell_area, vect(cefas_crop), cells = TRUE)
+ex_risk <- terra::extract(diffuse_pollution_risk, vect(hybas_lv12_dg), cells = TRUE)
+ex_area <- terra::extract(cell_area, vect(hybas_lv12_dg), cells = TRUE)
 names(ex_risk)[2] <- "risk"
 names(ex_area)[2] <- "area_ha"
 ex_risk$area_ha <- ex_area$area_ha
-ex_risk$S_Catchmt <- cefas_crop$S_Catchmt[ex_risk$ID]
+ex_risk$HYBAS_ID <- hybas_lv12_dg$HYBAS_ID[ex_risk$ID]
 
 catch_risk <- ex_risk %>%
-  group_by(S_Catchmt) %>%
+  group_by(HYBAS_ID) %>%
   summarise(
     mean_diffuse_risk = round(weighted.mean(risk, area_ha, na.rm = TRUE), 4),
     total_ha = round(sum(area_ha, na.rm = TRUE), 1),
     .groups = "drop"
   )
 
-ex_source <- terra::extract(source_risk, vect(cefas_crop), cells = TRUE)
-ex_src_area <- terra::extract(cell_area, vect(cefas_crop), cells = TRUE)
+ex_source <- terra::extract(source_risk, vect(hybas_lv12_dg), cells = TRUE)
+ex_src_area <- terra::extract(cell_area, vect(hybas_lv12_dg), cells = TRUE)
 names(ex_source)[2] <- "src_risk"
 names(ex_src_area)[2] <- "area_ha"
 ex_source$area_ha <- ex_src_area$area_ha
-ex_source$S_Catchmt <- cefas_crop$S_Catchmt[ex_source$ID]
+ex_source$HYBAS_ID <- hybas_lv12_dg$HYBAS_ID[ex_source$ID]
 
 catch_source <- ex_source %>%
-  group_by(S_Catchmt) %>%
+  group_by(HYBAS_ID) %>%
   summarise(
     mean_source_risk = round(weighted.mean(src_risk, area_ha, na.rm = TRUE), 4),
     .groups = "drop"
   )
 
-pour_max <- pour_points %>%
+# Pour-point rollup: max (single biggest outlet) AND sum (total risk this
+# catchment sends to the coast across all its outlets — valid without
+# double-counting, since D8 routing partitions non-overlapping contributing
+# areas per outlet, per our earlier discussion).
+pour_agg <- pour_points %>%
   st_drop_geometry() %>%
-  group_by(S_Catchmt) %>%
-  summarise(max_pour_accum = max(accum_risk, na.rm = TRUE), .groups = "drop")
-pour_max$max_pour_accum[is.infinite(pour_max$max_pour_accum)] <- NA
+  group_by(HYBAS_ID) %>%
+  summarise(
+    max_pour_accum = max(accum_risk, na.rm = TRUE),
+    total_pour_accum_raw = sum(accum_risk_raw, na.rm = TRUE),
+    n_pour_points = n(),
+    .groups = "drop"
+  )
+pour_agg$max_pour_accum[is.infinite(pour_agg$max_pour_accum)] <- NA
 
 catch_risk <- catch_risk %>%
-  left_join(catch_source, by = "S_Catchmt") %>%
-  left_join(pour_max, by = "S_Catchmt") %>%
-  left_join(st_drop_geometry(cefas_crop[, c("S_Catchmt", "S_CatNAME")]),
-            by = "S_Catchmt") %>%
+  left_join(catch_source, by = "HYBAS_ID") %>%
+  left_join(pour_agg, by = "HYBAS_ID") %>%
+  left_join(st_drop_geometry(hybas_lv12_dg[, c("HYBAS_ID", "S_CatNAME")]),
+            by = "HYBAS_ID") %>%
   arrange(desc(mean_diffuse_risk))
 
 cat("  Catchment risk summary:\n")
@@ -2529,8 +3071,8 @@ print(catch_risk, n = 50)
 write.csv(catch_risk, "outputs/catchments/catchment_risk_summary.csv", row.names = FALSE)
 cat("  Saved: outputs/catchments/catchment_risk_summary.csv\n")
 
-cefas_risk <- merge(cefas_crop, catch_risk, by = c("S_Catchmt", "S_CatNAME"), all.x = TRUE)
-st_write(cefas_risk, "outputs/catchments/catchments_with_risk.gpkg",
+hybas_risk <- merge(hybas_lv12_dg, catch_risk, by = c("HYBAS_ID", "S_CatNAME"), all.x = TRUE)
+st_write(hybas_risk, "outputs/catchments/catchments_with_risk.gpkg",
          delete_dsn = TRUE, quiet = TRUE)
 cat("  Saved: outputs/catchments/catchments_with_risk.gpkg\n")
 
@@ -2538,7 +3080,7 @@ cat("  Saved: outputs/catchments/catchments_with_risk.gpkg\n")
 # ---- Catchment composition (for downstream maps) ----
 
 catch_composition <- lc_props %>%
-  group_by(S_Catchmt, S_CatNAME) %>%
+  group_by(HYBAS_ID, S_CatNAME) %>%
   summarise(
     n_classes = n_distinct(eunis_code),
     total_pixels = sum(n_pixels),
@@ -2549,10 +3091,11 @@ catch_composition <- lc_props %>%
   ) %>%
   arrange(S_CatNAME)
 
-print(catch_composition)
+print(catch_composition, n = 30)
 
 
 # ---- STEP 7: Diffuse pollution risk maps ----
+# (cefas_risk -> hybas_risk throughout: same panels, HydroBASINS catchment unit)
 
 cat("\n  --- Step 7: Diffuse pollution risk maps ---\n")
 
@@ -2561,7 +3104,7 @@ dir.create("figures/catchments", showWarnings = FALSE, recursive = TRUE)
 # Panel 1: Source risk per catchment
 p1 <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_risk, aes(fill = mean_source_risk),
+  geom_sf(data = hybas_risk, aes(fill = mean_source_risk),
           colour = "grey30", linewidth = 0.3) +
   scale_fill_gradient(name = "Mean\nsource\nrisk",
                       low = "#fee0d2", high = "#67000d", na.value = "grey80") +
@@ -2573,7 +3116,7 @@ p1 <- ggplot() +
 # Panel 2: Diffuse pollution risk per catchment
 p2 <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_risk, aes(fill = mean_diffuse_risk),
+  geom_sf(data = hybas_risk, aes(fill = mean_diffuse_risk),
           colour = "grey30", linewidth = 0.3) +
   scale_fill_gradient(name = "Mean\ndiffuse\nrisk",
                       low = "#fee0d2", high = "#67000d", na.value = "grey80") +
@@ -2610,13 +3153,13 @@ rivers_plot$accum_risk[rivers_plot$accum_risk == 0] <- NA
 
 p3 <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_risk, fill = "white", colour = "grey70", linewidth = 0.2) +
+  geom_sf(data = hybas_risk, fill = "white", colour = "grey70", linewidth = 0.2) +
   geom_sf(data = rivers_plot[is.na(rivers_plot$accum_risk), ],
           colour = "steelblue", linewidth = 0.3, alpha = 0.4) +
   geom_sf(data = rivers_plot[which(!is.na(rivers_plot$accum_risk)), ],
           aes(colour = accum_risk), linewidth = 0.6) +
-  scale_colour_viridis_c(name = "Accumulated\nrisk", option = "inferno",
-                         direction = -1, trans = "sqrt") +
+  scale_colour_gradient(name = "Accumulated\nrisk", low = "#f5deb3", high = "#a50026",
+                        trans = "sqrt") +
   geom_sf_label(data = top10_labels, aes(label = .data[[river_name_col]]),
                 size = 2.2, fill = alpha("white", 0.7), linewidth = 0.2) +
   geom_sf(data = scamp_aoi_sf, fill = NA, colour = "black", linewidth = 0.6) +
@@ -2636,7 +3179,7 @@ cat("  Saved: figures/threats/pour_point_histogram.png\n")
 # Panel 4: Catchments coloured by mean risk, pour points sized by accumulated risk
 p4 <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_risk, aes(fill = mean_diffuse_risk),
+  geom_sf(data = hybas_risk, aes(fill = mean_diffuse_risk),
           colour = "grey30", linewidth = 0.3) +
   scale_fill_gradient(name = "Mean\ndiffuse\nrisk",
                       low = "#fee0d2", high = "#67000d", na.value = "grey80") +
@@ -2650,7 +3193,7 @@ p4 <- ggplot() +
   map_theme + coord_sf(crs = 27700)
 
 # Panel 5: Pixel-wise accumulated risk (SCIMAP flow accumulation raster)
-risk_accum_crop <- mask(crop(risk_accum, ext(vect(cefas_crop))), vect(cefas_crop))
+risk_accum_crop <- mask(crop(risk_accum, ext(vect(hybas_lv12_dg))), vect(hybas_lv12_dg))
 agg_factor <- max(1, round(ncol(risk_accum_crop) / 500))
 risk_accum_plot <- terra::aggregate(risk_accum_crop, fact = agg_factor, fun = "max", na.rm = TRUE)
 cat(sprintf("  Raster aggregated %dx for plotting: %d x %d -> %d x %d\n",
@@ -2671,7 +3214,7 @@ ggsave("figures/threats/risk_accum_raster.png", p5_accum,
        width = 12, height = 10, units = "in", dpi = 300)
 cat("  Saved: figures/threats/risk_accum_raster.png\n")
 
-m <- mapview(cefas_risk, zcol = "mean_diffuse_risk", layer.name = "Catchment diffuse risk") +
+m <- mapview(hybas_risk, zcol = "mean_diffuse_risk", layer.name = "Catchment diffuse risk") +
   mapview(rivers_in_catch, zcol = "accum_risk",
           label = "watercourse_name", layer.name = "River accumulated risk") +
   mapview(rivers_top10, zcol = "accum_risk", color = "red", lwd = 3,
@@ -2706,7 +3249,7 @@ if (hutton_validated) {
   p_combined <- (p1 + p2) / (p3 + p4) / (p5 + plot_spacer()) +
     plot_annotation(
       title = "Diffuse Pollution Risk per Catchment",
-      subtitle = "SCIMAP source risk × TWI hydrological connectivity — CEFAS/IHU catchments",
+      subtitle = "SCIMAP source risk × TWI hydrological connectivity — HydroBASINS lvl 12 catchments",
       theme = theme(plot.title = element_text(size = 16, face = "bold"),
                     plot.subtitle = element_text(size = 12))
     )
@@ -2717,7 +3260,7 @@ if (hutton_validated) {
   p_combined <- (p1 + p2) / (p3 + p4) +
     plot_annotation(
       title = "Diffuse Pollution Risk per Catchment",
-      subtitle = "SCIMAP source risk × TWI hydrological connectivity — CEFAS/IHU catchments",
+      subtitle = "SCIMAP source risk × TWI hydrological connectivity — HydroBASINS lvl 12 catchments",
       theme = theme(plot.title = element_text(size = 16, face = "bold"),
                     plot.subtitle = element_text(size = 12))
     )
@@ -2732,14 +3275,14 @@ cat("  Saved: figures/catchments/diffuse_pollution_risk_comparison.png\n")
 
 cat("\n----- 4f. Catchment land cover maps -----\n")
 
-cefas_comp <- merge(cefas_crop, catch_composition,
-                     by = c("S_Catchmt", "S_CatNAME"), all.x = TRUE)
+hybas_comp <- merge(hybas_lv12_dg, catch_composition,
+                     by = c("HYBAS_ID", "S_CatNAME"), all.x = TRUE)
 
-cefas_extent <- st_bbox(cefas_crop)
+hybas_extent <- st_bbox(hybas_lv12_dg)
 
 p_catch_dominant <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_comp, aes(fill = dominant_desc),
+  geom_sf(data = hybas_comp, aes(fill = dominant_desc),
           colour = "grey30", linewidth = 0.3) +
   scale_fill_brewer(name = "Dominant\nland cover", palette = "Set3") +
   geom_sf(data = rivers_in_catch, colour = "steelblue", linewidth = 0.2, alpha = 0.4) +
@@ -2747,7 +3290,7 @@ p_catch_dominant <- ggplot() +
   geom_sf(data = smr_solway_bng, fill = NA, colour = "navy",
           linewidth = 0.4, linetype = "dashed") +
   labs(title = "Dominant Land Cover per Catchment",
-       subtitle = "HLCM 2022 EUNIS Level 2 — CEFAS/IHU catchments draining into SCAMP AOI") +
+       subtitle = "HLCM 2022 EUNIS Level 2 — HydroBASINS lvl 12 catchments draining into SCAMP AOI") +
   map_theme + coord_sf(crs = 27700)
 ggsave("figures/threats/catchment_dominant_landcover.png", p_catch_dominant,
        width = 14, height = 10, units = "in", dpi = 300)
@@ -2755,7 +3298,7 @@ cat("  Saved: figures/threats/catchment_dominant_landcover.png\n")
 
 p_catch_pour <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_risk, aes(fill = mean_diffuse_risk),
+  geom_sf(data = hybas_risk, aes(fill = mean_diffuse_risk),
           colour = "grey30", linewidth = 0.3) +
   scale_fill_gradient(name = "Mean\ndiffuse\nrisk",
                       low = "#fee0d2", high = "#67000d", na.value = "grey80") +
@@ -2773,15 +3316,15 @@ cat("  Saved: figures/threats/catchment_pour_points.png\n")
 
 plantation_pct <- lc_props %>%
   filter(eunis_code == "G3.F") %>%
-  select(S_Catchmt, plantation_pct = proportion) %>%
+  select(HYBAS_ID, plantation_pct = proportion) %>%
   mutate(plantation_pct = round(plantation_pct * 100, 1))
 
-cefas_plantation <- merge(cefas_crop, plantation_pct, by = "S_Catchmt", all.x = TRUE)
-cefas_plantation$plantation_pct[is.na(cefas_plantation$plantation_pct)] <- 0
+hybas_plantation <- merge(hybas_lv12_dg, plantation_pct, by = "HYBAS_ID", all.x = TRUE)
+hybas_plantation$plantation_pct[is.na(hybas_plantation$plantation_pct)] <- 0
 
 p_catch_plantation <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_plantation, aes(fill = plantation_pct),
+  geom_sf(data = hybas_plantation, aes(fill = plantation_pct),
           colour = "grey30", linewidth = 0.3) +
   scale_fill_viridis_c(name = "Conifer\nplantation\n(% area)",
                        na.value = "grey80", option = "inferno") +
@@ -2799,7 +3342,7 @@ cat("  Saved: figures/threats/catchment_plantation_pct.png\n")
 
 cat("\n----- 4g. Save catchment outputs -----\n")
 
-st_write(cefas_comp, "outputs/threats/catchment_landcover.gpkg",
+st_write(hybas_comp, "outputs/threats/catchment_landcover.gpkg",
          delete_dsn = TRUE, quiet = TRUE)
 cat("  Saved: outputs/threats/catchment_landcover.gpkg\n")
 
@@ -2950,7 +3493,7 @@ cat("  Saved: outputs/catchments/marine_pollution_exposure.tif\n")
 
 p_exposure <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_risk, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_sf(data = hybas_risk, fill = "grey95", colour = "grey70", linewidth = 0.2) +
   tidyterra::geom_spatraster(data = exposure_norm) +
   scale_fill_viridis_c(name = "Pollution\nexposure", option = "inferno",
                        direction = -1, na.value = "transparent") +
@@ -2974,7 +3517,7 @@ print(st_drop_geometry(rivers_in_catch[urr_idx, c("watercourse_name", "accum_ris
 urr_rivers <- rivers_in_catch[urr_idx, ]
 urr_bbox <- st_bbox(urr_rivers)
 p_urr <- ggplot() +
-  geom_sf(data = cefas_risk, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_sf(data = hybas_risk, fill = "grey95", colour = "grey70", linewidth = 0.2) +
   geom_sf(data = rivers_in_catch, colour = "steelblue", linewidth = 0.3, alpha = 0.4) +
   geom_sf(data = urr_rivers, aes(colour = accum_risk), linewidth = 1.2) +
   scale_colour_viridis_c(name = "Accumulated\nrisk", option = "inferno", direction = -1) +
@@ -2993,43 +3536,56 @@ cat("  Saved: figures/threats/urr_water_risk.png\n")
 
 cat("\n----- Step 9: Integrate marine pollution into cumulative threats -----\n")
 
-# Resample marine pollution exposure to the 1km reference grid
-pollution_1km <- resample(exposure_norm, ref_rast, method = "bilinear")
-pollution_1km <- mask(pollution_1km, smr_mask)
-cat(sprintf("  Marine pollution resampled to 1km: %d x %d\n",
-            nrow(pollution_1km), ncol(pollution_1km)))
+# Use GEBCO-resolution grid as the fine reference (preserves coastal detail)
+fine_ref <- exposure_norm
+fine_mask <- rasterize(vect(smr_solway_bng), fine_ref, field = 1)
+cat(sprintf("  Fine reference grid: %d x %d cells (%.0fm resolution)\n",
+            ncol(fine_ref), nrow(fine_ref), res(fine_ref)[1]))
 
-# Add to normalised layers and rebuild cumulative pressure (excluding noise)
-norm_rasters[["diffuse_pollution"]] <- pollution_1km
-raw_rasters[["diffuse_pollution"]]  <- resample(exposure_rast, ref_rast, method = "bilinear") %>%
-  mask(smr_mask)
-
+# Resample all 1km pressure layers up to the fine grid
 noise_layers <- grep("^noise_", names(norm_rasters), value = TRUE)
 stack_layers <- setdiff(names(norm_rasters), noise_layers)
 cat(sprintf("  Excluding %d noise layers: %s\n", length(noise_layers),
             paste(noise_layers, collapse = ", ")))
 
-pressure_stack_full <- rast(norm_rasters[stack_layers])
-cumulative_pressure_full <- sum(pressure_stack_full, na.rm = TRUE)
-cumulative_pressure_full <- mask(cumulative_pressure_full, smr_mask)
+fine_layers <- list()
+for (lyr in stack_layers) {
+  fine_layers[[lyr]] <- resample(norm_rasters[[lyr]], fine_ref, method = "bilinear") %>%
+    mask(fine_mask)
+  cat(sprintf("    Resampled: %s\n", lyr))
+}
 
-# Fill coastal edge gaps: iteratively extend nearest values until no NA cells remain
-smr_valid <- !is.na(values(smr_mask))
-n_na <- sum(is.na(values(cumulative_pressure_full)) & smr_valid)
+# Add diffuse pollution at native resolution (no resampling needed)
+fine_layers[["diffuse_pollution"]] <- mask(exposure_norm, fine_mask)
+cat("    Added: diffuse_pollution (native resolution)\n")
+
+# Also keep 1km versions for norm_rasters/raw_rasters lists
+norm_rasters[["diffuse_pollution"]] <- resample(exposure_norm, ref_rast, method = "max") %>%
+  mask(smr_mask)
+raw_rasters[["diffuse_pollution"]]  <- resample(exposure_rast, ref_rast, method = "max") %>%
+  mask(smr_mask)
+
+pressure_stack_full <- rast(fine_layers)
+cumulative_pressure_full <- sum(pressure_stack_full, na.rm = TRUE)
+cumulative_pressure_full <- mask(cumulative_pressure_full, fine_mask)
+
+# Fill coastal edge gaps at fine resolution
+fine_valid <- !is.na(values(fine_mask))
+n_na <- sum(is.na(values(cumulative_pressure_full)) & fine_valid)
 pass <- 0L
 while (n_na > 0) {
   pass <- pass + 1L
   cumulative_pressure_full <- focal(cumulative_pressure_full, w = 3, fun = "mean",
                                      na.policy = "only", na.rm = TRUE)
-  cumulative_pressure_full <- mask(cumulative_pressure_full, smr_mask)
-  n_na_new <- sum(is.na(values(cumulative_pressure_full)) & smr_valid)
+  cumulative_pressure_full <- mask(cumulative_pressure_full, fine_mask)
+  n_na_new <- sum(is.na(values(cumulative_pressure_full)) & fine_valid)
   if (n_na_new == n_na) break
   n_na <- n_na_new
 }
 cat(sprintf("  Coastal gap fill: %d passes, %d NA cells remaining\n", pass, n_na))
 
-cat(sprintf("  Layers in updated stack: %d (%s)\n",
-            nlyr(pressure_stack_full), paste(names(norm_rasters), collapse = ", ")))
+cat(sprintf("  Layers in stack: %d (%s)\n",
+            nlyr(pressure_stack_full), paste(names(fine_layers), collapse = ", ")))
 cat(sprintf("  Cumulative pressure range (with pollution): %.2f – %.2f\n",
             minmax(cumulative_pressure_full)[1], minmax(cumulative_pressure_full)[2]))
 
@@ -3051,9 +3607,9 @@ ggsave("figures/threats/cumulative_pressure_with_pollution.png", p_cumulative_fu
        width = 14, height = 10, units = "in", dpi = 300)
 cat("  Saved: figures/threats/cumulative_pressure_with_pollution.png\n")
 
-writeRaster(cumulative_pressure_full, "outputs/threats/cumulative_pressure_with_pollution_1km.tif",
+writeRaster(cumulative_pressure_full, "outputs/threats/cumulative_pressure_with_pollution.tif",
             overwrite = TRUE, gdal = c("COMPRESS=LZW"))
-cat("  Saved: outputs/threats/cumulative_pressure_with_pollution_1km.tif\n")
+cat("  Saved: outputs/threats/cumulative_pressure_with_pollution.tif\n")
 
 
 # ---- STEP 10: Individual threat figures ----
@@ -3085,7 +3641,7 @@ cat("  Saved: figures/threats/individual/cumulative_pressure.png\n")
 # River accumulated risk
 p_rivers_risk <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_risk, fill = "grey95", colour = "grey70", linewidth = 0.2) +
+  geom_sf(data = hybas_risk, fill = "grey95", colour = "grey70", linewidth = 0.2) +
   geom_sf(data = rivers_in_catch[which(!is.na(rivers_in_catch$accum_risk) &
                                         rivers_in_catch$accum_risk > 0), ],
           aes(colour = accum_risk), linewidth = 0.6) +
@@ -3101,7 +3657,7 @@ cat("  Saved: figures/threats/individual/river_accumulated_risk.png\n")
 # Pour points
 p_pour <- ggplot() +
   geom_sf(data = las_dg_bng, fill = "grey92", colour = "grey50", linewidth = 0.3) +
-  geom_sf(data = cefas_risk, aes(fill = mean_diffuse_risk),
+  geom_sf(data = hybas_risk, aes(fill = mean_diffuse_risk),
           colour = "grey30", linewidth = 0.3) +
   scale_fill_gradient(name = "Catchment\nmean risk",
                       low = "#fee0d2", high = "#67000d", na.value = "grey80") +
