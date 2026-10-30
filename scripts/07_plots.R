@@ -4641,7 +4641,7 @@ p_sg_hex <- base_map("Hexagon Connectivity — Seagrass",
                      tile_type = "cartolight", zoom = 10) +
   geom_sf(data = aois, fill = NA, colour = "steelblue", linewidth = 0.4, linetype = "dashed") +
   geom_sf(data = sg_hex_bng, aes(fill = status), colour = "grey40", linewidth = 0.15, alpha = 0.35) +
-  scale_fill_manual(name = "Hexagon status", values = hex_status_pal, na.value = NA) +
+  scale_fill_manual(name = "Seagrass Presence", values = hex_status_pal, na.value = NA) +
   ggnewscale::new_scale_colour() +
   geom_sf(data = sg_lines_bng, aes(colour = Value, linewidth = Value), alpha = 0.85,
           arrow = grid::arrow(length = unit(0.12, "cm"), type = "closed", angle = 20)) +
